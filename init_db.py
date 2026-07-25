@@ -31,4 +31,5 @@ def init_database():
         return False
 
 if __name__ == "__main__":
-    init_database()
+    success = init_database()
+    exit(0 if success else 1)  # ← Προσθέσε αυτή τη γραμμή
