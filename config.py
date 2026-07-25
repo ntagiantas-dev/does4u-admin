@@ -3,14 +3,16 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# Δεν χρειάζεται python-dotenv! Manual load:
 def load_env():
+    """Load environment variables from .env file"""
     if os.path.exists('.env'):
         with open('.env') as f:
             for line in f:
-                if line.strip() and not line.startswith('#'):
-                    key, value = line.strip().split('=', 1)
-                    os.environ[key] = value
+                line = line.strip()
+                # Skip empty lines and comments
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
 
 load_env()
 DB_URL = os.getenv("DATABASE_URL")
