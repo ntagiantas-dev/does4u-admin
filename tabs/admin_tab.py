@@ -2,8 +2,10 @@ import streamlit as st
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 import uuid
+
+from utils.prompts import BLOG_CATEGORIES
 
 
 # ============================================
@@ -13,15 +15,23 @@ DRAFTS_FILE = "drafts.json"
 BLOG_FILE = "blog_data.json"
 MAX_DRAFTS_IN_HISTORY = 30
 
+LANGUAGE_CHOICES: Dict[str, str] = {
+    "🇬🇷 Greek": "Greek",
+    "🇬🇧 English": "English",
+    "🌐 Both (Greek + English)": "Both",
+}
+
+# Only the two CEO-approved categories exist.
+CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
+
+
 # ============================================
-# UTILITY FUNCTIONS
+# JSON PERSISTENCE
 # ============================================
 
 def load_drafts() -> List[Dict]:
-    """Load all drafts from drafts.json"""
     if not os.path.exists(DRAFTS_FILE):
         return []
-    
     try:
         with open(DRAFTS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -33,7 +43,6 @@ def load_drafts() -> List[Dict]:
 
 
 def save_drafts(drafts: List[Dict]) -> bool:
-    """Save drafts to drafts.json"""
     try:
         with open(DRAFTS_FILE, "w", encoding="utf-8") as f:
             json.dump(drafts, f, ensure_ascii=False, indent=2)
@@ -44,489 +53,464 @@ def save_drafts(drafts: List[Dict]) -> bool:
 
 
 def load_blog() -> List[Dict]:
-    """Load published articles from blog_data.json"""
     if not os.path.exists(BLOG_FILE):
         return []
-    
     try:
         with open(BLOG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError:
         return []
     except Exception as e:
-        st.error(f"Error loading blog data: {str(e)}")
+        st.error(f"Error loading blog: {str(e)}")
         return []
 
 
 def save_blog(articles: List[Dict]) -> bool:
-    """Save blog articles to blog_data.json"""
     try:
         with open(BLOG_FILE, "w", encoding="utf-8") as f:
             json.dump(articles, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        st.error(f"Error saving blog data: {str(e)}")
+        st.error(f"Error saving blog: {str(e)}")
         return False
 
+
+# ============================================
+# DRAFT OBJECT
+# ============================================
 
 def create_draft_object(
     article_data: Dict,
     teasers_data: Dict,
     target_point: str,
     category: str,
-    source_url: str
+    category_slug: str,
+    source_url: str,
+    language: str,
+    translation_id: Optional[str],
 ) -> Dict:
-    """Create a draft object with all necessary data"""
+    """Build a draft dict ready for JSON storage.
+
+    FastAPI-consumed URL fields:
+        category_slug + slug + language  ->  builds the final URL:
+            /blog/{category_slug}/{slug}/           (en)
+            /el/blog/{category_slug}/{slug}/        (el)
+    """
     return {
         "id": str(uuid.uuid4()),
         "title": article_data.get("title", "Untitled"),
-        "content": article_data.get("content", ""),
+        "slug": article_data.get("slug", ""),
+        "content": article_data.get("content_markdown", ""),
+        "meta_description": article_data.get("meta_description", ""),
+        "reading_time_minutes": article_data.get("reading_time_minutes", 0),
         "category": category,
+        "category_slug": category_slug,
         "date": datetime.now().strftime("%Y-%m-%d"),
         "author": "Does4U",
+        "language": language,
+        "translation_id": translation_id,
         "social_teaser": {
             "twitter": teasers_data.get("twitter", {}).get("text", ""),
             "linkedin": teasers_data.get("linkedin", {}).get("text", ""),
-            "facebook": teasers_data.get("facebook", {}).get("text", "")
+            "facebook": teasers_data.get("facebook", {}).get("text", ""),
         },
         "keywords": article_data.get("keywords", []),
         "target_point": target_point,
         "source_url": source_url,
         "status": "draft",
         "word_count": article_data.get("word_count", 0),
-        "created_at": datetime.now().isoformat()
+        "created_at": datetime.now().isoformat(),
     }
 
 
+# ============================================
+# DRAFT LIFECYCLE
+# ============================================
+
 def publish_draft(draft: Dict) -> bool:
-    """Move draft to published blog"""
     try:
-        # Load current blog
-        blog_articles = load_blog()
-        
-        # Update draft status
+        blog = load_blog()
         draft["status"] = "published"
         draft["published_at"] = datetime.now().isoformat()
-        
-        # Add to blog
-        blog_articles.append(draft)
-        
-        # Save blog
-        if not save_blog(blog_articles):
+        blog.append(draft)
+        if not save_blog(blog):
             return False
-        
-        # Remove from drafts
-        drafts = load_drafts()
-        drafts = [d for d in drafts if d.get("id") != draft.get("id")]
-        
-        if not save_drafts(drafts):
-            return False
-        
-        return True
-    
+        drafts = [d for d in load_drafts() if d.get("id") != draft.get("id")]
+        return save_drafts(drafts)
     except Exception as e:
-        st.error(f"Error publishing draft: {str(e)}")
+        st.error(f"Error publishing: {str(e)}")
         return False
 
 
 def delete_draft(draft_id: str) -> bool:
-    """Delete a draft"""
     try:
-        drafts = load_drafts()
-        drafts = [d for d in drafts if d.get("id") != draft_id]
+        drafts = [d for d in load_drafts() if d.get("id") != draft_id]
         return save_drafts(drafts)
     except Exception as e:
-        st.error(f"Error deleting draft: {str(e)}")
+        st.error(f"Error deleting: {str(e)}")
         return False
 
 
+def save_bundles_as_drafts(
+    bundles: List[Dict[str, Any]],
+    target_point: str,
+    category: str,
+    category_slug: str,
+    source_url: str,
+) -> bool:
+    drafts = load_drafts()
+    new_drafts = [
+        create_draft_object(
+            article_data=b["article"],
+            teasers_data=b["teasers"],
+            target_point=target_point,
+            category=category,
+            category_slug=category_slug,
+            source_url=source_url,
+            language=b["language"],
+            translation_id=b["translation_id"],
+        )
+        for b in bundles
+    ]
+    combined = drafts + new_drafts
+    if len(combined) > MAX_DRAFTS_IN_HISTORY:
+        combined = combined[-MAX_DRAFTS_IN_HISTORY:]
+    return save_drafts(combined)
+
+
+def publish_bundles(
+    bundles: List[Dict[str, Any]],
+    target_point: str,
+    category: str,
+    category_slug: str,
+    source_url: str,
+) -> bool:
+    blog = load_blog()
+    for b in bundles:
+        draft = create_draft_object(
+            article_data=b["article"],
+            teasers_data=b["teasers"],
+            target_point=target_point,
+            category=category,
+            category_slug=category_slug,
+            source_url=source_url,
+            language=b["language"],
+            translation_id=b["translation_id"],
+        )
+        draft["status"] = "published"
+        draft["published_at"] = datetime.now().isoformat()
+        blog.append(draft)
+    return save_blog(blog)
+
+
 # ============================================
-# MAIN RENDER FUNCTION
+# RENDER HELPERS
 # ============================================
 
-def render_admin_tab():
-    """Admin panel for blog management"""
-    
-    # ============================================
-    # CUSTOM CSS
-    # ============================================
-    st.markdown("""
-    <style>
-        .admin-header {
-            background: linear-gradient(135deg, #3776ab 0%, #1e3a5f 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            text-align: center;
-        }
-        
-        .admin-header h1 {
-            margin: 0;
-            font-size: 2.5em;
-        }
-        
-        .admin-section {
-            background: white;
-            border-left: 6px solid #3776ab;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 20px 0;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        
-        .admin-section h2 {
-            color: #3776ab;
-            margin-top: 0;
-            border-bottom: 2px solid #FFD43B;
-            padding-bottom: 10px;
-        }
-        
-        .draft-card {
-            background: #f8f9fa;
-            border: 2px solid #e9ecef;
-            border-radius: 8px;
-            padding: 15px;
-            margin: 10px 0;
-            transition: all 0.3s ease;
-        }
-        
-        .draft-card:hover {
-            border-color: #3776ab;
-            box-shadow: 0 4px 12px rgba(55, 118, 171, 0.2);
-        }
-        
-        .draft-title {
-            font-weight: 700;
-            font-size: 1.1em;
-            color: #3776ab;
-            margin-bottom: 8px;
-        }
-        
-        .draft-meta {
-            font-size: 0.9em;
-            color: #666;
-            margin-bottom: 10px;
-        }
-        
-        .status-badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-        
-        .status-draft {
-            background-color: #fff3cd;
-            color: #856404;
-        }
-        
-        .teaser-box {
-            background: white;
-            border: 1px solid #e9ecef;
-            border-radius: 6px;
-            padding: 12px;
-            margin: 10px 0;
-        }
-        
-        .teaser-platform {
-            font-weight: 600;
-            color: #3776ab;
-            font-size: 0.9em;
-            margin-bottom: 6px;
-        }
-        
-        .teaser-text {
-            font-size: 0.95em;
-            color: #555;
-            margin-bottom: 8px;
-            font-style: italic;
-            line-height: 1.4;
-        }
-        
-        .char-count {
-            font-size: 0.8em;
-            color: #999;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # ============================================
-    # HEADER
-    # ============================================
-    st.markdown("""
-    <div class="admin-header">
-        <h1>⚙️ Admin Panel</h1>
-        <p>Generate, manage, and publish blog articles</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # ============================================
-    # TABS
-    # ============================================
+def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
+    a = bundle["article"]
+    with st.container(border=True):
+        st.markdown(
+            f"### 📄 Article Preview — {bundle['language_name']} ({bundle['language']})"
+        )
+        if bundle.get("translation_id"):
+            st.caption(f"🔗 translation_id: `{bundle['translation_id']}`")
+        st.markdown(f"**Title:** {a.get('title', '—')}")
+        if a.get("slug"):
+            st.markdown(f"**Slug:** `{a['slug']}`")
+        if a.get("meta_description"):
+            st.markdown(f"**Meta description:** {a['meta_description']}")
+        st.markdown(f"**Category:** {category}")
+        st.markdown(
+            f"**Word count:** {a.get('word_count', 0)} "
+            f"| **Reading time:** {a.get('reading_time_minutes', 0)} min"
+        )
+        kws = a.get("keywords") or []
+        st.markdown(f"**Keywords:** {', '.join(kws) if kws else '—'}")
+        st.markdown("---")
+        st.markdown(a.get("content_markdown", ""))
+
+
+def _render_teasers(bundle: Dict[str, Any]) -> None:
+    teasers = bundle["teasers"]
+    lang_code = bundle["language"]
+    with st.container(border=True):
+        st.markdown("### 📱 Social Media Teasers")
+        for key, label, limit in (
+            ("twitter", "🐦 Twitter/X", 280),
+            ("linkedin", "💼 LinkedIn", 300),
+            ("facebook", "📘 Facebook", 150),
+        ):
+            text = (teasers.get(key) or {}).get("text", "")
+            st.markdown("<div class='teaser-box'>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='teaser-platform'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"<div class='teaser-text'>{text}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='char-count'>{len(text)} / {limit} characters</div>",
+                unsafe_allow_html=True,
+            )
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("📋 Copy", key=f"copy_{key}_{lang_code}"):
+                    st.code(text)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_cleaner_debug(cleaner_output: Dict[str, Any]) -> None:
+    with st.expander("🔧 Cleaner output (debug)", expanded=False):
+        if cleaner_output.get("_fallback"):
+            st.warning("⚠️ Cleaner failed — showing raw content fallback.")
+        st.markdown(f"**Topic summary:** {cleaner_output.get('topic_summary') or '—'}")
+        st.markdown("**Key facts:**")
+        facts = cleaner_output.get("key_facts") or []
+        if facts:
+            for f in facts:
+                st.markdown(f"- {f}")
+        else:
+            st.markdown("_(none)_")
+        st.markdown("**Cleaned content (first 800 chars):**")
+        st.code((cleaner_output.get("cleaned_content") or "")[:800])
+
+
+def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
+    _render_article_preview(bundle, category)
+    _render_teasers(bundle)
+
+
+# ============================================
+# MAIN RENDER — no header (header lives in app.py)
+# ============================================
+
+def render_admin_tab() -> None:
+    """Render the three admin tabs (Generate / Drafts / Analytics)."""
+
+    if "last_gen" not in st.session_state:
+        st.session_state["last_gen"] = None
+
     admin_tabs = st.tabs(["📝 Generate Article", "📚 Drafts History", "📊 Analytics"])
-    
-    # ============================================
-    # TAB 1: GENERATE ARTICLE
-    # ============================================
+
+    # ---------- TAB 1: GENERATE ----------
     with admin_tabs[0]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
         st.markdown("<h2>📝 Generate New Article</h2>", unsafe_allow_html=True)
-        
-        # Form
+
         col1, col2 = st.columns(2)
-        
         with col1:
             target_point = st.text_input(
                 "Target Point (Keywords) *",
                 placeholder="e.g., automation excel outreach",
-                help="Keywords to search for content"
+                help="Keywords to search for content",
             )
-        
         with col2:
             category = st.selectbox(
                 "Category *",
-                options=[
-                    "Web Scraping",
-                    "Excel & Reporting",
-                    "Data Collection",
-                    "AI Workflows",
-                    "Custom Python Scripts"
-                ],
-                help="Select article category"
+                options=CATEGORY_NAMES,
+                help="Determines section + writing angle (traffic vs conversion)",
             )
-        
-        # Generate button
+
+        language_label = st.selectbox(
+            "Language *",
+            options=list(LANGUAGE_CHOICES.keys()),
+            index=0,  # Greek-first (D-010)
+            help=(
+                "🌐 Both generates 2 articles (Greek + English) sharing a "
+                "translation_id, for hreflang pairing on the FastAPI site."
+            ),
+        )
+        language_value = LANGUAGE_CHOICES[language_label]
+
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             generate_btn = st.button("🚀 Generate Article", use_container_width=True)
-        
         st.markdown("</div>", unsafe_allow_html=True)
-        
-        # ============================================
-        # GENERATION LOGIC - LAZY LOADING
-        # ============================================
+
         if generate_btn:
             if not target_point or not category:
                 st.error("❌ Please fill in all required fields")
             else:
-                # Step 1: Extract content with Jina (LAZY LOAD)
-                with st.spinner("🔍 Extracting content from web..."):
+                # Fetch (Jina)
+                extracted_data: Optional[Dict] = None
+                with st.spinner("🔍 Fetching content from web..."):
                     try:
                         from utils.jina_service import JinaService
-                        jina_service = JinaService()
-                        extracted_data = jina_service.search_and_extract(target_point)
+                        extracted_data = JinaService().search_and_extract(target_point)
                     except Exception as e:
-                        st.error(f"❌ Error with Jina service: {str(e)}")
-                        extracted_data = None
-                
-                if extracted_data:
-                    # Step 2: Generate article + teasers (LAZY LOAD)
+                        st.error(f"❌ Jina error: {e}")
+
+                if not extracted_data:
+                    st.warning("⚠️ No content extracted. Pipeline aborted.")
+                else:
                     try:
                         from utils.article_generator import ArticleGenerator
                         generator = ArticleGenerator()
-                        result = generator.full_pipeline(
+                    except Exception as e:
+                        st.error(f"❌ Error initializing ArticleGenerator: {e}")
+                        generator = None
+
+                    if generator is not None:
+                        output = generator.full_pipeline(
                             extracted_content=extracted_data.get("content", ""),
                             target_point=target_point,
-                            category=category
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Error with article generation: {str(e)}")
-                        result = None
-                    
-                    if result:
-                        article_data, teasers_data = result
-                        
-                        # Step 3: Create draft
-                        draft = create_draft_object(
-                            article_data=article_data,
-                            teasers_data=teasers_data,
-                            target_point=target_point,
                             category=category,
-                            source_url=extracted_data.get("source_url", "")
+                            language_selection=language_value,
                         )
-                        
-                        # Display generated article
-                        st.success("✅ Article generated successfully!")
-                        
-                        # ============================================
-                        # DISPLAY ARTICLE PREVIEW
-                        # ============================================
-                        with st.container(border=True):
-                            st.markdown("### 📄 Article Preview")
-                            st.markdown(f"**Title:** {draft['title']}")
-                            st.markdown(f"**Category:** {category}")
-                            st.markdown(f"**Word Count:** {draft['word_count']} words")
-                            st.markdown(f"**Keywords:** {', '.join(draft['keywords'])}")
-                            st.markdown("---")
-                            st.markdown(draft['content'])
-                        
-                        # ============================================
-                        # DISPLAY SOCIAL TEASERS
-                        # ============================================
-                        with st.container(border=True):
-                            st.markdown("### 📱 Social Media Teasers")
-                            
-                            # Twitter
-                            st.markdown("<div class='teaser-box'>", unsafe_allow_html=True)
-                            st.markdown("<div class='teaser-platform'>🐦 Twitter/X</div>", unsafe_allow_html=True)
-                            twitter_text = draft['social_teaser']['twitter']
-                            st.markdown(f"<div class='teaser-text'>{twitter_text}</div>", unsafe_allow_html=True)
-                            st.markdown(f"<div class='char-count'>{len(twitter_text)} / 280 characters</div>", unsafe_allow_html=True)
-                            col1, col2 = st.columns([3, 1])
-                            with col2:
-                                if st.button("📋 Copy", key="copy_twitter"):
-                                    st.write(twitter_text)
-                                    st.success("Copied!")
-                            st.markdown("</div>", unsafe_allow_html=True)
-                            
-                            # LinkedIn
-                            st.markdown("<div class='teaser-box'>", unsafe_allow_html=True)
-                            st.markdown("<div class='teaser-platform'>💼 LinkedIn</div>", unsafe_allow_html=True)
-                            linkedin_text = draft['social_teaser']['linkedin']
-                            st.markdown(f"<div class='teaser-text'>{linkedin_text}</div>", unsafe_allow_html=True)
-                            st.markdown(f"<div class='char-count'>{len(linkedin_text)} / 300 characters</div>", unsafe_allow_html=True)
-                            col1, col2 = st.columns([3, 1])
-                            with col2:
-                                if st.button("📋 Copy", key="copy_linkedin"):
-                                    st.write(linkedin_text)
-                                    st.success("Copied!")
-                            st.markdown("</div>", unsafe_allow_html=True)
-                            
-                            # Facebook
-                            st.markdown("<div class='teaser-box'>", unsafe_allow_html=True)
-                            st.markdown("<div class='teaser-platform'>📘 Facebook</div>", unsafe_allow_html=True)
-                            facebook_text = draft['social_teaser']['facebook']
-                            st.markdown(f"<div class='teaser-text'>{facebook_text}</div>", unsafe_allow_html=True)
-                            st.markdown(f"<div class='char-count'>{len(facebook_text)} / 150 characters</div>", unsafe_allow_html=True)
-                            col1, col2 = st.columns([3, 1])
-                            with col2:
-                                if st.button("📋 Copy", key="copy_facebook"):
-                                    st.write(facebook_text)
-                                    st.success("Copied!")
-                            st.markdown("</div>", unsafe_allow_html=True)
-                        
-                        # ============================================
-                        # SAVE OR PUBLISH
-                        # ============================================
-                        st.markdown("---")
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            if st.button("💾 Save as Draft", use_container_width=True):
-                                drafts = load_drafts()
-                                # Keep only last MAX_DRAFTS_IN_HISTORY
-                                drafts = drafts[-MAX_DRAFTS_IN_HISTORY+1:] if len(drafts) >= MAX_DRAFTS_IN_HISTORY else drafts
-                                drafts.append(draft)
-                                if save_drafts(drafts):
-                                    st.success("✅ Draft saved! Check the 'Drafts History' tab")
-                                else:
-                                    st.error("❌ Failed to save draft")
-                        
-                        with col2:
-                            if st.button("🚀 Publish Immediately", use_container_width=True):
-                                if publish_draft(draft):
-                                    st.success("✅ Article published to blog!")
-                                    st.balloons()
-                                else:
-                                    st.error("❌ Failed to publish article")
-    
-    # ============================================
-    # TAB 2: DRAFTS HISTORY
-    # ============================================
+                        st.session_state["last_gen"] = {
+                            "cleaner": output.get("cleaner", {}),
+                            "bundles": output.get("bundles", []),
+                            "category": category,
+                            "category_slug": output.get("category_slug", ""),
+                            "target_point": target_point,
+                            "source_url": extracted_data.get("source_url", ""),
+                            "saved": False,
+                            "published": False,
+                        }
+
+        # ---------- DISPLAY LAST GENERATION ----------
+        gen = st.session_state.get("last_gen")
+        if gen and gen.get("bundles"):
+            bundles = gen["bundles"]
+            category = gen["category"]
+            target_point = gen["target_point"]
+            source_url = gen["source_url"]
+            category_slug = gen["category_slug"]
+
+            st.success(f"✅ Generated {len(bundles)} article bundle(s) successfully!")
+            _render_cleaner_debug(gen["cleaner"])
+
+            if len(bundles) == 1:
+                _render_bundle(bundles[0], category)
+            else:
+                flag = {"el": "🇬🇷", "en": "🇬🇧"}
+                tabs = st.tabs(
+                    [f"{flag.get(b['language'], '🌐')} {b['language_name']}" for b in bundles]
+                )
+                for tab, bundle in zip(tabs, bundles):
+                    with tab:
+                        _render_bundle(bundle, category)
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "💾 Save as Draft",
+                    use_container_width=True,
+                    disabled=gen.get("saved") or gen.get("published"),
+                ):
+                    if save_bundles_as_drafts(
+                        bundles, target_point, category, category_slug, source_url
+                    ):
+                        gen["saved"] = True
+                        st.success(f"✅ Saved {len(bundles)} draft(s).")
+                    else:
+                        st.error("❌ Failed to save draft(s)")
+            with col2:
+                if st.button(
+                    "🚀 Publish Immediately",
+                    use_container_width=True,
+                    disabled=gen.get("published"),
+                ):
+                    if publish_bundles(
+                        bundles, target_point, category, category_slug, source_url
+                    ):
+                        gen["published"] = True
+                        st.success(f"✅ Published {len(bundles)} article(s)!")
+                        st.balloons()
+                    else:
+                        st.error("❌ Failed to publish")
+
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                if st.button("🗑️ Clear Result", use_container_width=True):
+                    st.session_state["last_gen"] = None
+                    st.rerun()
+
+    # ---------- TAB 2: DRAFTS ----------
     with admin_tabs[1]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
         st.markdown("<h2>📚 Drafts History</h2>", unsafe_allow_html=True)
-        
+
         drafts = load_drafts()
-        
         if not drafts:
-            st.info("📭 No drafts yet. Generate your first article in the 'Generate Article' tab!")
+            st.info("📭 No drafts yet. Generate your first article first!")
         else:
             st.markdown(f"**Total Drafts:** {len(drafts)} (Max {MAX_DRAFTS_IN_HISTORY})")
             st.markdown("---")
-            
-            # Display drafts in reverse order (newest first)
-            for idx, draft in enumerate(reversed(drafts)):
+            for draft in reversed(drafts):
                 with st.container(border=True):
                     col1, col2 = st.columns([4, 1])
-                    
                     with col1:
-                        st.markdown(f"<div class='draft-title'>{draft['title']}</div>", unsafe_allow_html=True)
-                        st.markdown(f"<div class='draft-meta'>", unsafe_allow_html=True)
-                        st.markdown(f"📅 {draft['date']} | 📂 {draft['category']} | 📝 {draft['word_count']} words", unsafe_allow_html=True)
-                        st.markdown(f"🎯 Target: {draft['target_point']}", unsafe_allow_html=True)
-                        st.markdown("</div>", unsafe_allow_html=True)
-                    
+                        st.markdown(
+                            f"<div class='draft-title'>{draft['title']}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        lang_badge = {"el": "🇬🇷", "en": "🇬🇧"}.get(
+                            draft.get("language", ""), "🌐"
+                        )
+                        st.markdown(
+                            f"📅 {draft['date']} | 📂 {draft['category']} "
+                            f"| 📝 {draft['word_count']} words | {lang_badge} {draft.get('language','—')}",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(f"🎯 Target: {draft['target_point']}")
+                        if draft.get("translation_id"):
+                            st.caption(f"🔗 translation_id: `{draft['translation_id']}`")
                     with col2:
-                        st.markdown(f"<span class='status-badge status-draft'>DRAFT</span>", unsafe_allow_html=True)
-                    
-                    # Action buttons
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        if st.button("👁️ Preview", key=f"preview_{draft['id']}"):
-                            st.markdown("**Preview:**")
-                            st.markdown(draft['content'][:300] + "...")
-                    
-                    with col2:
-                        if st.button("🚀 Publish", key=f"publish_{draft['id']}"):
+                        st.markdown(
+                            "<span class='status-badge status-draft'>DRAFT</span>",
+                            unsafe_allow_html=True,
+                        )
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        if st.button("👁️ Preview", key=f"pv_{draft['id']}"):
+                            st.markdown(draft["content"][:300] + "...")
+                    with c2:
+                        if st.button("🚀 Publish", key=f"pub_{draft['id']}"):
                             if publish_draft(draft):
                                 st.success("✅ Published!")
                                 st.rerun()
-                            else:
-                                st.error("❌ Failed to publish")
-                    
-                    with col3:
-                        if st.button("🗑️ Delete", key=f"delete_{draft['id']}"):
-                            if delete_draft(draft['id']):
+                    with c3:
+                        if st.button("🗑️ Delete", key=f"del_{draft['id']}"):
+                            if delete_draft(draft["id"]):
                                 st.success("✅ Deleted!")
                                 st.rerun()
-                            else:
-                                st.error("❌ Failed to delete")
-        
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    # ============================================
-    # TAB 3: ANALYTICS
-    # ============================================
+
+    # ---------- TAB 3: ANALYTICS ----------
     with admin_tabs[2]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
         st.markdown("<h2>📊 Analytics</h2>", unsafe_allow_html=True)
-        
         drafts = load_drafts()
         blog = load_blog()
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("📚 Published Articles", len(blog))
-        
-        with col2:
-            st.metric("📝 Draft Articles", len(drafts))
-        
-        with col3:
-            total_articles = len(blog) + len(drafts)
-            st.metric("📊 Total Articles", total_articles)
-        
-        # Category breakdown
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("📚 Published", len(blog))
+        c2.metric("📝 Drafts", len(drafts))
+        c3.metric("📊 Total", len(blog) + len(drafts))
+
         if blog:
             st.markdown("---")
-            st.markdown("**📂 Categories (Published):**")
-            categories = {}
-            for article in blog:
-                cat = article.get("category", "Uncategorized")
-                categories[cat] = categories.get(cat, 0) + 1
-            
-            for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
+            st.markdown("**🌐 By language:**")
+            lang_counts: Dict[str, int] = {}
+            for a in blog:
+                code = a.get("language", "—")
+                lang_counts[code] = lang_counts.get(code, 0) + 1
+            for code, count in sorted(lang_counts.items(), key=lambda x: -x[1]):
+                badge = {"el": "🇬🇷", "en": "🇬🇧"}.get(code, "🌐")
+                st.markdown(f"- {badge} `{code}`: **{count}** articles")
+
+            st.markdown("---")
+            st.markdown("**📂 By category:**")
+            cat_counts: Dict[str, int] = {}
+            for a in blog:
+                cat = a.get("category", "—")
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            for cat, count in sorted(cat_counts.items(), key=lambda x: -x[1]):
                 st.markdown(f"- {cat}: **{count}** articles")
-        
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ============================================
-# EXPORT FUNCTION
-# ============================================
 if __name__ == "__main__":
     render_admin_tab()
