@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Optional
 import uuid
 
 from utils.prompts import BLOG_CATEGORIES
+from utils.article_generator import (
+    SOURCE_MODE_AUTO,
+    SOURCE_MODE_MANUAL,
+    SOURCE_MODE_HYBRID,
+    SOURCE_MODES,
+)
 
 
 # ============================================
@@ -14,6 +20,7 @@ from utils.prompts import BLOG_CATEGORIES
 DRAFTS_FILE = "drafts.json"
 BLOG_FILE = "blog_data.json"
 MAX_DRAFTS_IN_HISTORY = 30
+MAX_MANUAL_URLS = 5
 
 LANGUAGE_CHOICES: Dict[str, str] = {
     "🇬🇷 Greek": "Greek",
@@ -21,7 +28,6 @@ LANGUAGE_CHOICES: Dict[str, str] = {
     "🌐 Both (Greek + English)": "Both",
 }
 
-# Only the two CEO-approved categories exist.
 CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
 
 
@@ -85,16 +91,18 @@ def create_draft_object(
     target_point: str,
     category: str,
     category_slug: str,
-    source_url: str,
     language: str,
     translation_id: Optional[str],
+    sources: List[Dict[str, str]],
 ) -> Dict:
-    """Build a draft dict ready for JSON storage.
+    """Build a draft dict ready for JSON storage and FastAPI consumption.
 
-    FastAPI-consumed URL fields:
-        category_slug + slug + language  ->  builds the final URL:
-            /blog/{category_slug}/{slug}/           (en)
-            /el/blog/{category_slug}/{slug}/        (el)
+    URL pattern built from this object:
+        /blog/{category_slug}/{slug}/           (en)
+        /el/blog/{category_slug}/{slug}/        (el)
+
+    ``translation_id`` groups GR/EN pairs for hreflang tags.
+    ``sources`` holds the citation list used in the article body.
     """
     return {
         "id": str(uuid.uuid4()),
@@ -115,8 +123,8 @@ def create_draft_object(
             "facebook": teasers_data.get("facebook", {}).get("text", ""),
         },
         "keywords": article_data.get("keywords", []),
+        "sources": sources,
         "target_point": target_point,
-        "source_url": source_url,
         "status": "draft",
         "word_count": article_data.get("word_count", 0),
         "created_at": datetime.now().isoformat(),
@@ -156,7 +164,6 @@ def save_bundles_as_drafts(
     target_point: str,
     category: str,
     category_slug: str,
-    source_url: str,
 ) -> bool:
     drafts = load_drafts()
     new_drafts = [
@@ -166,9 +173,9 @@ def save_bundles_as_drafts(
             target_point=target_point,
             category=category,
             category_slug=category_slug,
-            source_url=source_url,
             language=b["language"],
             translation_id=b["translation_id"],
+            sources=b.get("sources") or [],
         )
         for b in bundles
     ]
@@ -183,7 +190,6 @@ def publish_bundles(
     target_point: str,
     category: str,
     category_slug: str,
-    source_url: str,
 ) -> bool:
     blog = load_blog()
     for b in bundles:
@@ -193,14 +199,33 @@ def publish_bundles(
             target_point=target_point,
             category=category,
             category_slug=category_slug,
-            source_url=source_url,
             language=b["language"],
             translation_id=b["translation_id"],
+            sources=b.get("sources") or [],
         )
         draft["status"] = "published"
         draft["published_at"] = datetime.now().isoformat()
         blog.append(draft)
     return save_blog(blog)
+
+
+# ============================================
+# URL PARSING HELPER
+# ============================================
+
+def _parse_urls(raw: str) -> List[str]:
+    """Split a textarea value into a list of clean URLs."""
+    if not raw:
+        return []
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    seen: set = set()
+    cleaned: List[str] = []
+    for url in lines:
+        if url in seen:
+            continue
+        seen.add(url)
+        cleaned.append(url)
+    return cleaned
 
 
 # ============================================
@@ -227,6 +252,16 @@ def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
         )
         kws = a.get("keywords") or []
         st.markdown(f"**Keywords:** {', '.join(kws) if kws else '—'}")
+
+        used_sources = a.get("sources") or []
+        if used_sources:
+            st.markdown("**Sources cited:**")
+            for s in used_sources:
+                sid = s.get("id", "?")
+                title = s.get("title", "") or s.get("url", "")
+                url = s.get("url", "")
+                st.markdown(f"- [{sid}] [{title}]({url})")
+
         st.markdown("---")
         st.markdown(a.get("content_markdown", ""))
 
@@ -275,13 +310,24 @@ def _render_cleaner_debug(cleaner_output: Dict[str, Any]) -> None:
         st.code((cleaner_output.get("cleaned_content") or "")[:800])
 
 
+def _render_sources_debug(sources: List[Dict[str, str]]) -> None:
+    if not sources:
+        return
+    with st.expander(f"🔗 Sources fetched ({len(sources)})", expanded=False):
+        for idx, s in enumerate(sources, start=1):
+            st.markdown(f"**[{idx}]** {s.get('title', '(no title)')}")
+            st.markdown(f"    {s.get('url', '')}")
+            if s.get("domain"):
+                st.caption(f"    domain: `{s['domain']}`")
+
+
 def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
     _render_article_preview(bundle, category)
     _render_teasers(bundle)
 
 
 # ============================================
-# MAIN RENDER — no header (header lives in app.py)
+# MAIN RENDER
 # ============================================
 
 def render_admin_tab() -> None:
@@ -322,6 +368,25 @@ def render_admin_tab() -> None:
         )
         language_value = LANGUAGE_CHOICES[language_label]
 
+        source_mode = st.radio(
+            "Source Mode *",
+            options=SOURCE_MODES,
+            index=0,
+            horizontal=True,
+            help=(
+                "Auto: Jina search. Manual: your URLs only. "
+                "Hybrid: Jina search + your URLs."
+            ),
+        )
+
+        urls_input = ""
+        if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID):
+            urls_input = st.text_area(
+                f"URLs (one per line, 1-{MAX_MANUAL_URLS} max)",
+                placeholder="https://example.com/article\nhttps://...",
+                height=150,
+            )
+
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             generate_btn = st.button("🚀 Generate Article", use_container_width=True)
@@ -331,53 +396,61 @@ def render_admin_tab() -> None:
             if not target_point or not category:
                 st.error("❌ Please fill in all required fields")
             else:
-                # Fetch (Jina)
-                extracted_data: Optional[Dict] = None
-                with st.spinner("🔍 Fetching content from web..."):
-                    try:
-                        from utils.jina_service import JinaService
-                        extracted_data = JinaService().search_and_extract(target_point)
-                    except Exception as e:
-                        st.error(f"❌ Jina error: {e}")
+                urls = _parse_urls(urls_input) if urls_input else []
 
-                if not extracted_data:
-                    st.warning("⚠️ No content extracted. Pipeline aborted.")
-                else:
-                    try:
-                        from utils.article_generator import ArticleGenerator
-                        generator = ArticleGenerator()
-                    except Exception as e:
-                        st.error(f"❌ Error initializing ArticleGenerator: {e}")
-                        generator = None
+                # Validate URL count for Manual / Hybrid
+                if source_mode == SOURCE_MODE_MANUAL and not urls:
+                    st.error("❌ Manual mode requires at least 1 URL.")
+                    return  # Bug #2 fix: return, not st.stop()
 
-                    if generator is not None:
-                        output = generator.full_pipeline(
-                            extracted_content=extracted_data.get("content", ""),
-                            target_point=target_point,
-                            category=category,
-                            language_selection=language_value,
-                        )
-                        st.session_state["last_gen"] = {
-                            "cleaner": output.get("cleaner", {}),
-                            "bundles": output.get("bundles", []),
-                            "category": category,
-                            "category_slug": output.get("category_slug", ""),
-                            "target_point": target_point,
-                            "source_url": extracted_data.get("source_url", ""),
-                            "saved": False,
-                            "published": False,
-                        }
+                if len(urls) > MAX_MANUAL_URLS:
+                    st.warning(
+                        f"⚠️ {len(urls)} URLs provided — using the first "
+                        f"{MAX_MANUAL_URLS}."
+                    )
+                    urls = urls[:MAX_MANUAL_URLS]
+
+                # ---- Delegate everything to the pipeline ----
+                try:
+                    from utils.article_generator import ArticleGenerator
+
+                    generator = ArticleGenerator()
+                except Exception as e:
+                    st.error(f"❌ Error initializing ArticleGenerator: {e}")
+                    generator = None
+
+                if generator is not None:
+                    output = generator.full_pipeline(
+                        target_point=target_point,
+                        category=category,
+                        source_mode=source_mode,
+                        language_selection=language_value,
+                        urls=urls if urls else None,
+                    )
+
+                    st.session_state["last_gen"] = {
+                        "cleaner": output.get("cleaner", {}),
+                        "bundles": output.get("bundles", []),
+                        "sources": output.get("sources", []),
+                        "category": category,
+                        "category_slug": output.get("category_slug", ""),
+                        "target_point": target_point,
+                        "source_mode": source_mode,
+                        "saved": False,
+                        "published": False,
+                    }
 
         # ---------- DISPLAY LAST GENERATION ----------
         gen = st.session_state.get("last_gen")
         if gen and gen.get("bundles"):
             bundles = gen["bundles"]
             category = gen["category"]
-            target_point = gen["target_point"]
-            source_url = gen["source_url"]
             category_slug = gen["category_slug"]
+            target_point = gen["target_point"]
+            sources = gen.get("sources", [])
 
             st.success(f"✅ Generated {len(bundles)} article bundle(s) successfully!")
+            _render_sources_debug(sources)
             _render_cleaner_debug(gen["cleaner"])
 
             if len(bundles) == 1:
@@ -400,7 +473,7 @@ def render_admin_tab() -> None:
                     disabled=gen.get("saved") or gen.get("published"),
                 ):
                     if save_bundles_as_drafts(
-                        bundles, target_point, category, category_slug, source_url
+                        bundles, target_point, category, category_slug
                     ):
                         gen["saved"] = True
                         st.success(f"✅ Saved {len(bundles)} draft(s).")
@@ -412,9 +485,7 @@ def render_admin_tab() -> None:
                     use_container_width=True,
                     disabled=gen.get("published"),
                 ):
-                    if publish_bundles(
-                        bundles, target_point, category, category_slug, source_url
-                    ):
+                    if publish_bundles(bundles, target_point, category, category_slug):
                         gen["published"] = True
                         st.success(f"✅ Published {len(bundles)} article(s)!")
                         st.balloons()
@@ -457,6 +528,9 @@ def render_admin_tab() -> None:
                         st.markdown(f"🎯 Target: {draft['target_point']}")
                         if draft.get("translation_id"):
                             st.caption(f"🔗 translation_id: `{draft['translation_id']}`")
+                        n_sources = len(draft.get("sources") or [])
+                        if n_sources:
+                            st.caption(f"🔗 {n_sources} source(s)")
                     with col2:
                         st.markdown(
                             "<span class='status-badge status-draft'>DRAFT</span>",

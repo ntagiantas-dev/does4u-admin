@@ -1,19 +1,25 @@
 """
 Article generation pipeline for the does4u admin panel.
 
-Pipeline:
-    Jina (fetch) -> Cleaner -> Writer (per language, per category)
-                             -> Teasers (per language, per category)
+Pipeline (self-contained — handles fetch internally):
+    Fetch (Jina search and/or manual URLs)
+        -> Cleaner (language-agnostic)
+        -> Writer (per language, per category, with citations)
+        -> Teasers (per language, per category)
 
 Categories (see BLOG_CATEGORIES in utils.prompts):
     - "AI Updates"  : traffic-focused (news/curiosity angle)
     - "Growth Hack" : conversion-focused (problem/solution angle)
 
+Source modes:
+    - "Auto (Jina)"           : Jina SERP search -> extract top results
+    - "Manual (URLs)"         : user-provided URLs only
+    - "Hybrid (Jina + URLs)"  : user URLs first, then Jina search, merged
+
 Language handling:
-    - Cleaner runs ONCE (language-agnostic fact extraction).
+    - Cleaner runs ONCE.
     - Writer + Teasers run ONCE PER target language.
-    - For "Both", the two articles share a common ``translation_id`` (uuid)
-      so the FastAPI site can emit hreflang tags (x-default -> Greek).
+    - For "Both", articles share a common ``translation_id`` (uuid).
 """
 import json
 import logging
@@ -24,7 +30,11 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from openai import OpenAI
 
-from utils.prompts import BLOG_CATEGORIES, CLEANER_PROMPT
+from utils.prompts import (
+    BLOG_CATEGORIES,
+    CITATION_INSTRUCTIONS,
+    CLEANER_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +47,13 @@ LANGUAGE_OPTIONS: Dict[str, Dict[str, str]] = {
     "english": {"name": "English", "native": "English", "code": "en"},
 }
 
+# ============================================
+# SOURCE MODES
+# ============================================
+SOURCE_MODE_AUTO = "Auto (Jina)"
+SOURCE_MODE_MANUAL = "Manual (URLs)"
+SOURCE_MODE_HYBRID = "Hybrid (Jina + URLs)"
+SOURCE_MODES = [SOURCE_MODE_AUTO, SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID]
 
 # ============================================
 # MODEL CONFIG
@@ -53,12 +70,14 @@ CLEANER_TEMPERATURE = 0.3
 WRITER_TEMPERATURE = 0.7
 TEASER_TEMPERATURE = 0.8
 
-MAX_RAW_CONTENT_CHARS = 8000
+MAX_RAW_CONTENT_CHARS = 12000
 MAX_CLEANED_CONTENT_CHARS = 6000
+# Bug #3 fix: cap fallback content so we never send the full raw blob to Sol.
+FALLBACK_RAW_CONTENT_CHARS = 4000
 
 
 class ArticleGenerator:
-    """Blog article generation pipeline with category + language support."""
+    """Blog article generation pipeline with category + language + sources."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -67,14 +86,11 @@ class ArticleGenerator:
         self.client: OpenAI = OpenAI(api_key=self.api_key)
 
     # ------------------------------------------------------------------
-    # Language + category resolution
+    # Resolution helpers
     # ------------------------------------------------------------------
     @staticmethod
     def resolve_languages(selection: str) -> List[Dict[str, str]]:
-        """Map UI language selection to a list of language target dicts.
-
-        "Both" returns [greek, english] (Greek first, per D-010).
-        """
+        """Map UI language selection to a list of language target dicts."""
         sel = (selection or "").strip().lower()
         if sel in ("both", "bilingual", "el+en", "gr+en"):
             return [LANGUAGE_OPTIONS["greek"], LANGUAGE_OPTIONS["english"]]
@@ -87,11 +103,6 @@ class ArticleGenerator:
 
     @staticmethod
     def get_category_config(category: str) -> Dict[str, Any]:
-        """Return the category config dict (prompts, slug, mission).
-
-        Raises:
-            ValueError: if the category is not registered in BLOG_CATEGORIES.
-        """
         if category not in BLOG_CATEGORIES:
             raise ValueError(
                 f"Unknown category {category!r}. "
@@ -224,6 +235,7 @@ class ArticleGenerator:
         category: str,
         key_facts: Optional[List[str]] = None,
         language: str = "Greek",
+        sources: Optional[List[Dict[str, str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not cleaned_content or not cleaned_content.strip():
             logger.error("[Writer/%s] Empty cleaned content", language)
@@ -241,12 +253,17 @@ class ArticleGenerator:
             "\n".join(f"- {f}" for f in key_facts) if key_facts else "- (none provided)"
         )
 
+        sources = sources or []
+        sources_str = self._format_sources_for_prompt(sources)
+        citation_instructions = CITATION_INSTRUCTIONS.format(sources=sources_str)
+
         prompt = cfg["article_prompt"].format(
             target_point=target_point,
             category=category,
             language=language,
             cleaned_content=cleaned_content[:MAX_CLEANED_CONTENT_CHARS],
             key_facts=key_facts_str,
+            citation_instructions=citation_instructions,
         )
         result = self._call_llm_json(
             model=WRITER_MODEL,
@@ -263,10 +280,12 @@ class ArticleGenerator:
             return None
         if not result.get("slug"):
             result["slug"] = self._fallback_slug(result.get("title", ""))
+        if not isinstance(result.get("sources"), list):
+            result["sources"] = []
         return result
 
     # ------------------------------------------------------------------
-    # Stage 3 — Teasers (per language, per category)
+    # Stage 3 — Teasers
     # ------------------------------------------------------------------
     def generate_social_teasers(
         self,
@@ -303,50 +322,85 @@ class ArticleGenerator:
         return result
 
     # ------------------------------------------------------------------
-    # Full pipeline
+    # Full pipeline (self-contained — handles fetch)
     # ------------------------------------------------------------------
     def full_pipeline(
         self,
-        extracted_content: str,
         target_point: str,
         category: str,
+        source_mode: str = SOURCE_MODE_AUTO,
         language_selection: str = "Greek",
+        urls: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Run Cleaner once, then Writer + Teasers per language.
+        """Run the full pipeline: fetch -> clean -> write -> teasers.
+
+        Args:
+            target_point: SEO topic.
+            category: One of BLOG_CATEGORIES keys.
+            source_mode: SOURCE_MODE_AUTO / SOURCE_MODE_MANUAL / SOURCE_MODE_HYBRID.
+            language_selection: "Greek" | "English" | "Both".
+            urls: User-provided URLs. Required for Manual, optional for Hybrid.
 
         Returns:
             {
               "cleaner": {...},
+              "sources": [{"url","title","domain"}],
               "category_slug": "ai-updates" | "growth-hack",
-              "bundles": [
-                 {"language": "el", "language_name": "Greek",
-                  "translation_id": str | None,
-                  "article": {...}, "teasers": {...}},
-                 ...
-              ],
+              "bundles": [ {language, language_name, translation_id,
+                            article, teasers, sources}, ... ],
             }
         """
+        empty_result: Dict[str, Any] = {
+            "cleaner": {},
+            "sources": [],
+            "category_slug": "",
+            "bundles": [],
+        }
+
         try:
             cfg = self.get_category_config(category)
         except ValueError as exc:
             st.error(f"❌ {exc}")
-            return {"cleaner": {}, "category_slug": "", "bundles": []}
+            return empty_result
 
-        targets = self.resolve_languages(language_selection)
-        translation_id = str(uuid.uuid4()) if len(targets) > 1 else None
+        empty_result["category_slug"] = cfg["slug"]
 
+        # ---- Fetch content (mode-aware) ----
+        raw_content, sources = self._fetch_content(
+            source_mode=source_mode,
+            target_point=target_point,
+            urls=urls,
+        )
+        if not raw_content:
+            st.error("❌ No content could be fetched. Pipeline aborted.")
+            return empty_result
+
+        # ---- Cleaner (once) ----
         with st.spinner("🧹 Cleaning content..."):
-            cleaner_output = self.clean_content(extracted_content, target_point)
+            cleaner_output = self.clean_content(raw_content, target_point)
 
         if not cleaner_output:
-            logger.warning("[Pipeline] Cleaner failed — fallback to raw content")
-            st.warning("⚠️ Cleaner failed — falling back to raw content.")
+            # Bug #3 fix: truncate fallback content before sending to Sol.
+            truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
+            logger.warning(
+                "[Pipeline] Cleaner failed — falling back to truncated raw "
+                "content (%d chars)",
+                len(truncated),
+            )
+            st.warning(
+                f"⚠️ Cleaner failed — falling back to raw content "
+                f"(truncated to {FALLBACK_RAW_CONTENT_CHARS} chars)."
+            )
             cleaner_output = {
-                "cleaned_content": extracted_content,
+                "cleaned_content": truncated,
                 "key_facts": [],
                 "topic_summary": "(fallback — cleaner unavailable)",
                 "_fallback": True,
             }
+
+        # ---- Writer + Teasers per language ----
+        targets = self.resolve_languages(language_selection)
+        translation_id: Optional[str] = str(uuid.uuid4()) if len(targets) > 1 else None
 
         bundles: List[Dict[str, Any]] = []
         for target in targets:
@@ -360,6 +414,7 @@ class ArticleGenerator:
                     category=category,
                     key_facts=cleaner_output.get("key_facts") or [],
                     language=lang_name,
+                    sources=sources,
                 )
             if not article:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)
@@ -383,16 +438,113 @@ class ArticleGenerator:
                     "translation_id": translation_id,
                     "article": article,
                     "teasers": teasers,
+                    "sources": article.get("sources") or sources,
                 }
             )
 
         return {
             "cleaner": cleaner_output,
+            "sources": sources,
             "category_slug": cfg["slug"],
             "bundles": bundles,
         }
 
     # ------------------------------------------------------------------
+    # Internal — fetch
+    # ------------------------------------------------------------------
+    def _fetch_content(
+        self,
+        *,
+        source_mode: str,
+        target_point: str,
+        urls: Optional[List[str]],
+    ) -> tuple[str, List[Dict[str, str]]]:
+        """Fetch raw content based on source_mode.
+
+        Bug #5 fix: a single JinaService instance is used across both stages
+        so the rate-limit state (``_last_reader_call``) is preserved.
+
+        Bug #4 fix: sources are deduplicated by URL before returning.
+
+        Returns:
+            ``(raw_content, sources)``. Both empty on failure.
+        """
+        # Lazy import to avoid circular imports
+        from utils.jina_service import JinaService
+
+        jina = JinaService()  # Bug #5: single instance for rate limit state
+        manual_urls = urls or []
+        raw_content = ""
+        sources: List[Dict[str, str]] = []
+
+        # --- Manual URLs (Manual mode, or Hybrid mode) ---
+        if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID) and manual_urls:
+            with st.spinner(f"🔍 Extracting content from {len(manual_urls)} URL(s)..."):
+                merged = jina.extract_multiple(manual_urls, show_errors=True)
+            if merged:
+                raw_content = merged.get("content", "")
+                sources = merged.get("sources", [])
+
+        # --- Jina search (Auto mode, or Hybrid mode) ---
+        if source_mode in (SOURCE_MODE_AUTO, SOURCE_MODE_HYBRID):
+            with st.spinner("🔍 Searching + extracting (Jina)..."):
+                merged = jina.search_and_extract(target_point)
+            if merged:
+                auto_content = merged.get("content", "")
+                auto_sources = merged.get("sources", [])
+                if raw_content and auto_content:
+                    # Hybrid: manual content first, then auto
+                    raw_content = raw_content + "\n\n---\n\n" + auto_content
+                    sources = sources + auto_sources
+                elif auto_content:
+                    raw_content = auto_content
+                    sources = auto_sources
+
+        # Bug #4: dedupe sources by URL after merging
+        return raw_content, self._dedupe_sources(sources)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dedupe_sources(
+        sources: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """Remove duplicate sources by URL, preserving order.
+
+        Bug #4 fix: in Hybrid mode the same URL may appear both in the manual
+        list and in the Jina SERP, which caused duplicate citations in the
+        article.
+        """
+        if not sources:
+            return []
+        seen: set = set()
+        result: List[Dict[str, str]] = []
+        for s in sources:
+            url = (s.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            result.append(s)
+        return result
+
+    @staticmethod
+    def _format_sources_for_prompt(sources: List[Dict[str, str]]) -> str:
+        """Format sources as a numbered list for the citation prompt.
+
+        Example output:
+            [1] Title A - https://example.com/a
+            [2] Title B - https://example.com/b
+        """
+        if not sources:
+            return "(no sources provided)"
+        lines = []
+        for idx, src in enumerate(sources, start=1):
+            title = src.get("title", "") or src.get("url", "")
+            url = src.get("url", "")
+            lines.append(f"[{idx}] {title} - {url}")
+        return "\n".join(lines)
+
     @staticmethod
     def _fallback_slug(title: str) -> str:
         if not title:
@@ -409,9 +561,9 @@ class ArticleGenerator:
 if __name__ == "__main__":
     generator = ArticleGenerator()
     output = generator.full_pipeline(
-        extracted_content="Sample about automation and Excel workflows...",
         target_point="automation excel",
         category="Growth Hack",
+        source_mode=SOURCE_MODE_AUTO,
         language_selection="Both",
     )
     print(json.dumps(output, indent=2, ensure_ascii=False, default=str))

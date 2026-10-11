@@ -107,15 +107,16 @@ CLEANER_PROMPT = """You are a content cleaner for an SEO blog.
 TARGET KEYWORDS:
 {target_keywords}
 
-RAW WEB CONTENT:
+RAW WEB CONTENT (from multiple sources, separated by "---"):
 {raw_content}
 
 TASK:
 1. Remove all HTML, ads, navigation, and boilerplate.
 2. Remove repetition and filler text.
 3. Keep only factual, relevant content that serves the target keywords.
-4. Extract 3-5 key facts as short standalone strings.
-5. Write a one-sentence topic summary.
+4. When sources disagree, prefer the most specific and recent claim.
+5. Extract 3-5 key facts as short standalone strings.
+6. Write a one-sentence topic summary.
 
 OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 {{
@@ -126,9 +127,34 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — WRITER: AI UPDATES (traffic-focused)
+# BLOG — CITATION INSTRUCTIONS (shared)
 # ============================================
-# Goal: attract readers. News-driven, timely, shareable.
+# Injected into the article prompt. Uses {sources} for the numbered list.
+# ============================================
+CITATION_INSTRUCTIONS = """CITATIONS REQUIREMENT:
+
+For EVERY factual claim, statistic, or quote that comes from the provided sources:
+1. Add an inline citation immediately after the claim: [1], [2], [3], etc.
+2. At the end of the article, add a "## Sources" section listing every cited source:
+
+## Sources
+[1] Source Title - https://url.com
+[2] Source Title - https://url.com
+
+RULES:
+- ONLY cite sources from the numbered list below.
+- Do NOT invent sources or URLs.
+- Number citations in order of first appearance in the article.
+- If a claim is general knowledge (common facts), no citation is needed.
+- Every source that appears in the Sources section MUST have at least one
+  inline citation [N] in the body.
+
+AVAILABLE SOURCES:
+{sources}"""
+
+
+# ============================================
+# BLOG — WRITER: AI UPDATES (traffic-focused)
 # ============================================
 ARTICLE_GENERATION_PROMPT_AI_UPDATES = """You are an SEO content writer for a premium automation agency.
 
@@ -144,6 +170,8 @@ INPUT:
 - Cleaned source content: {cleaned_content}
 - Key facts: {key_facts}
 
+{citation_instructions}
+
 STRUCTURE:
 1. SEO Title (50-60 chars, includes the primary keyword)
 2. URL slug (see SLUG RULES)
@@ -156,7 +184,8 @@ STRUCTURE:
    - What readers should watch next
 6. Conclusion: brief takeaway + soft call-to-action
    (e.g. "Follow for more AI updates" — NOT a sales pitch)
-7. 5 SEO keywords
+7. Sources section (if citations were used)
+8. 5 SEO keywords
 
 FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
 
@@ -184,14 +213,16 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
   "content_markdown": "...",
   "keywords": ["...", "...", "...", "...", "..."],
   "word_count": 800,
-  "reading_time_minutes": 4
+  "reading_time_minutes": 4,
+  "sources": [
+    {{"id": 1, "title": "...", "url": "..."}},
+    {{"id": 2, "title": "...", "url": "..."}}
+  ]
 }}"""
 
 
 # ============================================
 # BLOG — WRITER: GROWTH HACK (conversion-focused)
-# ============================================
-# Goal: convert readers into leads. Problem-first, benefit-driven, decisive CTA.
 # ============================================
 ARTICLE_GENERATION_PROMPT_GROWTH_HACK = """You are an SEO content writer for a premium automation agency.
 
@@ -208,6 +239,8 @@ INPUT:
 - Cleaned source content: {cleaned_content}
 - Key facts: {key_facts}
 
+{citation_instructions}
+
 STRUCTURE:
 1. SEO Title (50-60 chars, includes the primary keyword AND signals a benefit)
 2. URL slug (see SLUG RULES)
@@ -221,7 +254,8 @@ STRUCTURE:
    - A mini case example or realistic scenario with measurable results
 6. Conclusion: strong call-to-action — invite the reader to book a call,
    request a free automation audit, or contact Does4U.
-7. 5 SEO keywords
+7. Sources section (if citations were used)
+8. 5 SEO keywords
 
 FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
 
@@ -250,12 +284,16 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
   "content_markdown": "...",
   "keywords": ["...", "...", "...", "...", "..."],
   "word_count": 800,
-  "reading_time_minutes": 4
+  "reading_time_minutes": 4,
+  "sources": [
+    {{"id": 1, "title": "...", "url": "..."}},
+    {{"id": 2, "title": "...", "url": "..."}}
+  ]
 }}"""
 
 
 # ============================================
-# BLOG — TEASERS: AI UPDATES (curiosity hook)
+# BLOG — TEASERS: AI UPDATES
 # ============================================
 SOCIAL_TEASER_PROMPT_AI_UPDATES = """You are a social media copywriter for a premium automation agency.
 
@@ -294,7 +332,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — TEASERS: GROWTH HACK (problem hook)
+# BLOG — TEASERS: GROWTH HACK
 # ============================================
 SOCIAL_TEASER_PROMPT_GROWTH_HACK = """You are a social media copywriter for a premium automation agency.
 
@@ -336,9 +374,6 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 # ============================================
 # CATEGORY REGISTRY
 # ============================================
-# Single source of truth for blog categories.
-# Add a new category here ONLY after a CEO decision.
-# ============================================
 BLOG_CATEGORIES = {
     "AI Updates": {
         "slug": "ai-updates",
@@ -363,6 +398,7 @@ __all__ = [
     "CHAT_SYSTEM_PROMPT",
     "FINALIZE_PROMPT",
     "CLEANER_PROMPT",
+    "CITATION_INSTRUCTIONS",
     "ARTICLE_GENERATION_PROMPT_AI_UPDATES",
     "ARTICLE_GENERATION_PROMPT_GROWTH_HACK",
     "SOCIAL_TEASER_PROMPT_AI_UPDATES",

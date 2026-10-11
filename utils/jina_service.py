@@ -1,19 +1,23 @@
 """
 Jina AI service for the does4u admin panel.
 
-Provides two capabilities:
-    - search_and_extract(): search the web via s.jina.ai, then extract
-      the top result's content via r.jina.ai.
-    - extract_from_url():   read a single URL via r.jina.ai.
+Capabilities:
+    - search_links()      : SERP search via s.jina.ai (5 links, no content)
+    - extract_from_url()  : read a single URL via r.jina.ai
+    - extract_multiple()  : read N URLs, return merged content + sources
+    - search_and_extract(): search + extract + merge (auto mode)
 
 API reference:
-    - Search:    https://s.jina.ai/<query>   (GET, Accept: application/json)
+    - Search:    https://s.jina.ai/<query>   (GET, X-Respond-With: no-content)
     - Reader:    https://r.jina.ai/<url>     (GET, Accept: application/json)
+
+Rate limit: 1 request / second (enforced between r.jina.ai calls).
 """
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 import streamlit as st
@@ -28,11 +32,16 @@ JINA_SEARCH_BASE = "https://s.jina.ai"
 JINA_READER_BASE = "https://r.jina.ai"
 
 DEFAULT_TIMEOUT = 30
-MAX_RESULTS_HARD_CAP = 5  # Jina search returns up to 5 entries
+DEFAULT_SEARCH_RESULTS = 3
+MAX_SEARCH_RESULTS = 5
+MAX_MANUAL_URLS = 5
+RATE_LIMIT_SECONDS = 1.0  # between r.jina.ai calls
+
+MIN_CONTENT_CHARS = 100  # reject pages with too little text
 
 
 class JinaService:
-    """Jina AI wrapper: web search + URL content extraction."""
+    """Jina AI wrapper: SERP search + URL content extraction + merge."""
 
     def __init__(self) -> None:
         """Initialize the Jina client using Streamlit secrets."""
@@ -42,131 +51,33 @@ class JinaService:
 
         self.search_base = JINA_SEARCH_BASE
         self.reader_base = JINA_READER_BASE
+        self._last_reader_call: float = 0.0  # for rate limiting
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — Search
     # ------------------------------------------------------------------
-    def search_and_extract(
-        self, target_point: str, max_results: int = 1
-    ) -> Optional[Dict[str, Any]]:
-        """Search the web for ``target_point`` and extract the top result.
+    def search_links(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        """Call s.jina.ai and return up to ``max_results`` SERP links.
 
-        Args:
-            target_point: Search query (e.g. "automation excel outreach").
-            max_results: How many search hits to consider (Jina returns up to 5).
+        Uses ``X-Respond-With: no-content`` so Jina only returns the SERP
+        (URLs + titles), not the page bodies — much faster.
 
         Returns:
-            Extracted content dict (title, content, source_url, ...) or None.
-        """
-        results = self._search(target_point, max_results=max_results)
-        if not results:
-            return None
-
-        source_url = results[0].get("url")
-        if not source_url:
-            logger.error("[Jina] Search hit had no URL: %s", results[0])
-            st.error("No URL found in search results.")
-            return None
-
-        extracted = self.extract_from_url(source_url)
-        if not extracted:
-            return None
-
-        extracted["target_point"] = target_point
-        return extracted
-
-    def extract_from_url(self, url: str) -> Optional[Dict[str, Any]]:
-        """Fetch and extract the content of a single URL via r.jina.ai.
-
-        Args:
-            url: The full URL to read.
-
-        Returns:
-            Dict with title, content, source_url, description or None.
-        """
-        if not url:
-            st.error("Empty URL passed to extract_from_url().")
-            return None
-
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/json",
-            }
-            # r.jina.ai reads the page at the given URL.
-            reader_url = f"{self.reader_base}/{url}"
-
-            response = requests.get(
-                reader_url, headers=headers, timeout=DEFAULT_TIMEOUT
-            )
-            if response.status_code != 200:
-                logger.error(
-                    "[Jina] Reader failed (%s): %s",
-                    response.status_code,
-                    response.text[:300],
-                )
-                st.error(f"Extraction failed: {response.text[:300]}")
-                return None
-
-            payload = response.json()
-            # r.jina.ai JSON mode returns {"data": {...}} with the page fields.
-            data = payload.get("data", payload)
-
-            extracted: Dict[str, Any] = {
-                "title": data.get("title", "Untitled"),
-                "content": data.get("content", ""),
-                "source_url": url,
-                "description": data.get("description", ""),
-            }
-
-            if not extracted["content"] or len(extracted["content"].strip()) < 100:
-                logger.warning("[Jina] Extracted content too short: %s", url)
-                st.warning(
-                    "Extracted content is too short. Try a different target point."
-                )
-                return None
-
-            return extracted
-
-        except requests.exceptions.Timeout:
-            st.error("Request timeout - Jina service took too long to respond.")
-            return None
-        except requests.exceptions.RequestException as exc:
-            logger.exception("[Jina] Request error: %s", exc)
-            st.error(f"Request error: {exc}")
-            return None
-        except json.JSONDecodeError:
-            st.error("Failed to parse response from Jina.")
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[Jina] Unexpected error in extract_from_url: %s", exc)
-            st.error(f"Unexpected error in extract_from_url: {exc}")
-            return None
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _search(
-        self, query: str, max_results: int = 1
-    ) -> Optional[List[Dict[str, Any]]]:
-        """Call s.jina.ai and return a list of search hits.
-
-        s.jina.ai accepts the query as part of the URL path:
-            GET https://s.jina.ai/<url-encoded-query>
-        and returns JSON when ``Accept: application/json`` is set.
+            List of ``{"url": str, "title": str, "description": str}``.
+            Empty list on failure.
         """
         if not query or not query.strip():
-            st.error("Empty search query.")
-            return None
+            logger.error("[Jina] Empty search query")
+            return []
 
-        limit = max(1, min(int(max_results), MAX_RESULTS_HARD_CAP))
+        limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
 
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Accept": "application/json",
+                "X-Respond-With": "no-content",
             }
-            # URL-encode the query for the path.
             search_url = f"{self.search_base}/{quote(query)}"
 
             response = requests.get(
@@ -179,31 +90,237 @@ class JinaService:
                     response.text[:300],
                 )
                 st.error(f"Search failed: {response.text[:300]}")
-                return None
+                return []
 
             payload = response.json()
-            # s.jina.ai returns {"data": [ ... ]} in JSON mode.
-            results = payload.get("data", [])
-            if not isinstance(results, list) or not results:
-                st.warning("No search results found for this target point.")
-                return None
+            raw_results = payload.get("data", [])
+            if not isinstance(raw_results, list) or not raw_results:
+                logger.warning("[Jina] No SERP results for query: %s", query)
+                return []
 
-            return results[:limit]
+            links: List[Dict[str, str]] = []
+            for item in raw_results[:limit]:
+                url = item.get("url") or item.get("link")
+                if not url:
+                    continue
+                links.append(
+                    {
+                        "url": url,
+                        "title": item.get("title", ""),
+                        "description": item.get("description", ""),
+                    }
+                )
+            return links
 
         except requests.exceptions.Timeout:
             st.error("Search request timeout.")
-            return None
+            return []
         except requests.exceptions.RequestException as exc:
             logger.exception("[Jina] Search request error: %s", exc)
             st.error(f"Search request error: {exc}")
-            return None
+            return []
         except json.JSONDecodeError:
             st.error("Failed to parse search response from Jina.")
+            return []
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[Jina] Unexpected error in search_links: %s", exc)
+            st.error(f"Unexpected error in search: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Public API — Extraction
+    # ------------------------------------------------------------------
+    def extract_from_url(self, url: str) -> Optional[Dict[str, Any]]:
+        """Fetch and extract content from a single URL via r.jina.ai.
+
+        Enforces a 1-second gap between reader calls to respect rate limits.
+
+        Returns:
+            ``{"title", "content", "url", "description"}`` or ``None``.
+        """
+        if not url or not url.strip():
+            st.error("Empty URL passed to extract_from_url().")
+            return None
+
+        # Rate limit (skip wait on the very first call)
+        if self._last_reader_call > 0:
+            elapsed = time.monotonic() - self._last_reader_call
+            if elapsed < RATE_LIMIT_SECONDS:
+                time.sleep(RATE_LIMIT_SECONDS - elapsed)
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+            }
+            reader_url = f"{self.reader_base}/{url}"
+
+            response = requests.get(
+                reader_url, headers=headers, timeout=DEFAULT_TIMEOUT
+            )
+            self._last_reader_call = time.monotonic()
+
+            if response.status_code != 200:
+                logger.error(
+                    "[Jina] Reader failed (%s) for %s: %s",
+                    response.status_code,
+                    url,
+                    response.text[:300],
+                )
+                return None
+
+            payload = response.json()
+            data = payload.get("data", payload)
+
+            content = data.get("content", "") or ""
+            if len(content.strip()) < MIN_CONTENT_CHARS:
+                logger.warning(
+                    "[Jina] Extracted content too short (%d chars): %s",
+                    len(content),
+                    url,
+                )
+                return None
+
+            return {
+                "url": url,
+                "title": data.get("title", ""),
+                "content": content,
+                "description": data.get("description", ""),
+            }
+
+        except requests.exceptions.Timeout:
+            logger.error("[Jina] Reader timeout: %s", url)
+            return None
+        except requests.exceptions.RequestException as exc:
+            logger.exception("[Jina] Reader request error for %s: %s", url, exc)
+            return None
+        except json.JSONDecodeError:
+            logger.error("[Jina] Reader JSON decode error for %s", url)
             return None
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[Jina] Unexpected error in _search: %s", exc)
-            st.error(f"Unexpected error in search: {exc}")
+            logger.exception("[Jina] Unexpected error reading %s: %s", url, exc)
             return None
+
+    def extract_multiple(
+        self, urls: List[str], show_errors: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Extract content from up to ``MAX_MANUAL_URLS`` URLs and merge.
+
+        Args:
+            urls: List of URLs (1-5).
+            show_errors: Whether to surface per-URL errors to the UI.
+
+        Returns:
+            Merged dict ``{"content", "sources"}`` or ``None`` if **all** URLs
+            failed.
+        """
+        if not urls:
+            if show_errors:
+                st.error("No URLs provided.")
+            return None
+
+        # Deduplicate while preserving order
+        seen: set = set()
+        clean_urls: List[str] = []
+        for u in urls:
+            u = (u or "").strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            clean_urls.append(u)
+
+        if not clean_urls:
+            if show_errors:
+                st.error("No valid URLs provided.")
+            return None
+
+        if len(clean_urls) > MAX_MANUAL_URLS:
+            if show_errors:
+                st.warning(
+                    f"⚠️ {len(clean_urls)} URLs provided — using the first "
+                    f"{MAX_MANUAL_URLS} (max allowed)."
+                )
+            clean_urls = clean_urls[:MAX_MANUAL_URLS]
+
+        extractions: List[Dict[str, Any]] = []
+        for url in clean_urls:
+            result = self.extract_from_url(url)
+            if result:
+                extractions.append(result)
+            elif show_errors:
+                st.warning(f"⚠️ Could not extract content from: {url}")
+
+        if not extractions:
+            if show_errors:
+                st.error("❌ No content extracted from any of the provided URLs.")
+            return None
+
+        return self.merge_contents(extractions)
+
+    # ------------------------------------------------------------------
+    # Public API — Merge
+    # ------------------------------------------------------------------
+    @staticmethod
+    def merge_contents(extractions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge N extractions into a single content + sources list.
+
+        Returns:
+            {
+              "content": "<merged text with source separators>",
+              "sources": [
+                 {"url": "...", "title": "...", "domain": "..."},
+                 ...
+              ],
+            }
+        """
+        parts: List[str] = []
+        sources: List[Dict[str, str]] = []
+
+        for ext in extractions:
+            url = ext.get("url", "")
+            title = ext.get("title", "") or url
+            domain = urlparse(url).netloc or url
+
+            sources.append({"url": url, "title": title, "domain": domain})
+            parts.append(f"# Source: {title}\nURL: {url}\n\n{ext.get('content', '')}")
+
+        return {
+            "content": "\n\n---\n\n".join(parts),
+            "sources": sources,
+        }
+
+    # ------------------------------------------------------------------
+    # Public API — Combined (auto mode)
+    # ------------------------------------------------------------------
+    def search_and_extract(
+        self, target_point: str, max_results: int = DEFAULT_SEARCH_RESULTS
+    ) -> Optional[Dict[str, Any]]:
+        """Search + extract top results + merge (auto mode).
+
+        Returns:
+            ``{"content", "sources", "target_point"}`` or ``None``.
+        """
+        links = self.search_links(target_point, max_results=max_results)
+        if not links:
+            st.warning("No search results found for this target point.")
+            return None
+
+        extractions: List[Dict[str, Any]] = []
+        for link in links:
+            result = self.extract_from_url(link["url"])
+            if result:
+                # Prefer SERP title if the reader didn't return one
+                if not result.get("title") and link.get("title"):
+                    result["title"] = link["title"]
+                extractions.append(result)
+
+        if not extractions:
+            st.error("❌ Could not extract content from any search result.")
+            return None
+
+        merged = self.merge_contents(extractions)
+        merged["target_point"] = target_point
+        return merged
 
 
 # ============================================
