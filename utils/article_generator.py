@@ -22,9 +22,14 @@ Language handling:
     - For "Both", articles share a common ``translation_id`` (uuid).
 
 Model notes:
+    - All stages currently use a single model: gpt-5.6-luna.
     - GPT-5.x models require ``max_completion_tokens`` (not ``max_tokens``).
     - GPT-5.x models reject custom ``temperature``; only the default is
       accepted, so the parameter is omitted entirely.
+    - GPT-5.x are reasoning models: a large portion of ``max_completion_tokens``
+      is consumed by internal reasoning before any output is produced. Token
+      budgets are therefore generous, and an empty response triggers a single
+      retry with a doubled budget.
 """
 import json
 import logging
@@ -61,19 +66,25 @@ SOURCE_MODE_HYBRID = "Hybrid (Jina + URLs)"
 SOURCE_MODES = [SOURCE_MODE_AUTO, SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID]
 
 # ============================================
-# MODEL CONFIG
+# MODEL CONFIG — single model across all stages
 # ============================================
-CLEANER_MODEL = "gpt-5.6-luna"
-WRITER_MODEL = "gpt-5.6-sol"
-TEASER_MODEL = "gpt-5.6-sol"
+BLOG_MODEL = "gpt-5.6-luna"
 
-CLEANER_MAX_TOKENS = 2000
-WRITER_MAX_TOKENS = 3000
-TEASER_MAX_TOKENS = 1000
+CLEANER_MODEL = BLOG_MODEL
+WRITER_MODEL = BLOG_MODEL
+TEASER_MODEL = BLOG_MODEL
+
+# Token budgets (generous — reasoning models consume tokens internally).
+CLEANER_MAX_TOKENS = 4000
+WRITER_MAX_TOKENS = 8000
+TEASER_MAX_TOKENS = 2000
+
+# Retry multiplier when the model returns an empty response.
+EMPTY_RESPONSE_RETRY_MULTIPLIER = 2
 
 MAX_RAW_CONTENT_CHARS = 12000
 MAX_CLEANED_CONTENT_CHARS = 6000
-# Bug #3 fix: cap fallback content so we never send the full raw blob to Sol.
+# Bug #3 fix: cap fallback content so we never send the full raw blob to the model.
 FALLBACK_RAW_CONTENT_CHARS = 4000
 
 
@@ -124,18 +135,48 @@ class ArticleGenerator:
     ) -> Optional[str]:
         """Call the OpenAI Chat Completions API and return the text content.
 
+        Empty responses trigger a single retry with a doubled token budget.
+        This is necessary because GPT-5.x reasoning models occasionally consume
+        the entire completion budget on internal reasoning and emit no output.
+
         Note: GPT-5.x rejects custom temperature, so it is not sent.
         """
         try:
             response = self.client.chat.completions.create(
                 model=model,
-                max_completion_tokens=max_tokens,  # GPT-5.x requires this param
+                max_completion_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
             content = response.choices[0].message.content
+
             if not content or not content.strip():
-                logger.error("[%s] Empty response from %s", stage, model)
-                return None
+                # Retry once with a doubled budget.
+                retry_tokens = max_tokens * EMPTY_RESPONSE_RETRY_MULTIPLIER
+                logger.warning(
+                    "[%s] Empty response from %s — retrying with %d tokens",
+                    stage,
+                    model,
+                    retry_tokens,
+                )
+                response = self.client.chat.completions.create(
+                    model=model,
+                    max_completion_tokens=retry_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = response.choices[0].message.content
+
+                if not content or not content.strip():
+                    logger.error(
+                        "[%s] Empty response from %s after retry", stage, model
+                    )
+                    st.error(
+                        f"❌ [{stage}] Model returned an empty response twice. "
+                        f"Try a different topic or check the model name."
+                    )
+                    return None
+
+                logger.info("[%s] Retry succeeded for %s", stage, model)
+
             return content
         except Exception as exc:  # noqa: BLE001
             logger.exception("[%s] LLM call failed: %s", stage, exc)
@@ -378,7 +419,7 @@ class ArticleGenerator:
             cleaner_output = self.clean_content(raw_content, target_point)
 
         if not cleaner_output:
-            # Bug #3 fix: truncate fallback content before sending to Sol.
+            # Bug #3 fix: truncate fallback content before sending to the model.
             truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
             logger.warning(
                 "[Pipeline] Cleaner failed — falling back to truncated raw "
