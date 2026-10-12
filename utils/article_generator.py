@@ -125,7 +125,7 @@ class ArticleGenerator:
         try:
             response = self.client.chat.completions.create(
                 model=model,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,  # GPT-5.x requires this param
                 temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
