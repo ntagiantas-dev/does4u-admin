@@ -32,12 +32,27 @@ JINA_SEARCH_BASE = "https://s.jina.ai"
 JINA_READER_BASE = "https://r.jina.ai"
 
 DEFAULT_TIMEOUT = 30
-DEFAULT_SEARCH_RESULTS = 3
-MAX_SEARCH_RESULTS = 5
+DEFAULT_SEARCH_RESULTS = 6   # request more links so we can survive failures
+MAX_SEARCH_RESULTS = 8
+TARGET_VALID_SOURCES = 5     # stop extracting once we have this many
 MAX_MANUAL_URLS = 5
-RATE_LIMIT_SECONDS = 1.0  # between r.jina.ai calls
+RATE_LIMIT_SECONDS = 1.0     # between r.jina.ai calls
 
-MIN_CONTENT_CHARS = 100  # reject pages with too little text
+# Reject pages with too little text. Raised from 100 -> 500 because CAPTCHA
+# pages and near-empty templates were slipping through the old threshold.
+MIN_CONTENT_CHARS = 500
+
+# Phrases that almost always indicate a CAPTCHA / human-verification page.
+CAPTCHA_KEYWORDS = [
+    "prove your humanity",
+    "captcha",
+    "are you a robot",
+    "enable javascript",
+    "checking your browser",
+    "please verify you are human",
+    "not a robot",
+    "verify you are human",
+]
 
 
 class JinaService:
@@ -56,7 +71,7 @@ class JinaService:
     # ------------------------------------------------------------------
     # Public API — Search
     # ------------------------------------------------------------------
-    def search_links(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+    def search_links(self, query: str, max_results: int = 6) -> List[Dict[str, str]]:
         """Call s.jina.ai and return up to ``max_results`` SERP links.
 
         Uses ``X-Respond-With: no-content`` so Jina only returns the SERP
@@ -134,6 +149,8 @@ class JinaService:
         """Fetch and extract content from a single URL via r.jina.ai.
 
         Enforces a 1-second gap between reader calls to respect rate limits.
+        Rejects pages flagged with CAPTCHA warnings or whose text matches
+        known human-verification phrases.
 
         Returns:
             ``{"title", "content", "url", "description"}`` or ``None``.
@@ -173,10 +190,16 @@ class JinaService:
             data = payload.get("data", payload)
 
             content = data.get("content", "") or ""
+
+            # --- CAPTCHA detection (warning field + content keywords) ---
+            if self._is_captcha_content(data, content):
+                return None
+
             if len(content.strip()) < MIN_CONTENT_CHARS:
                 logger.warning(
-                    "[Jina] Extracted content too short (%d chars): %s",
+                    "[Jina] Extracted content too short (%d chars, min %d): %s",
                     len(content),
+                    MIN_CONTENT_CHARS,
                     url,
                 )
                 return None
@@ -297,6 +320,10 @@ class JinaService:
     ) -> Optional[Dict[str, Any]]:
         """Search + extract top results + merge (auto mode).
 
+        Requests more links than the target source count so that CAPTCHA /
+        empty pages can be skipped. Stops extracting as soon as
+        ``TARGET_VALID_SOURCES`` valid sources have been collected.
+
         Returns:
             ``{"content", "sources", "target_point"}`` or ``None``.
         """
@@ -307,6 +334,10 @@ class JinaService:
 
         extractions: List[Dict[str, Any]] = []
         for link in links:
+            # Stop once we have enough valid sources.
+            if len(extractions) >= TARGET_VALID_SOURCES:
+                break
+
             result = self.extract_from_url(link["url"])
             if result:
                 # Prefer SERP title if the reader didn't return one
@@ -321,6 +352,35 @@ class JinaService:
         merged = self.merge_contents(extractions)
         merged["target_point"] = target_point
         return merged
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_captcha_content(data: Dict[str, Any], content: str) -> bool:
+        """Detect CAPTCHA / human-verification pages.
+
+        Checks two signals:
+            1. Jina's own ``warning`` field for words like "captcha".
+            2. Known CAPTCHA phrases inside the extracted content.
+
+        Returns:
+            ``True`` if the page should be rejected.
+        """
+        # 1) Jina warning field
+        warning = str(data.get("warning", "")).lower()
+        if "captcha" in warning or "humanity" in warning:
+            logger.warning("[Jina] CAPTCHA warning field: %r", warning[:120])
+            return True
+
+        # 2) Content keyword check
+        content_lower = content.lower()
+        for kw in CAPTCHA_KEYWORDS:
+            if kw in content_lower:
+                logger.warning("[Jina] CAPTCHA keyword %r detected in content", kw)
+                return True
+
+        return False
 
 
 # ============================================

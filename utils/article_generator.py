@@ -36,6 +36,7 @@ import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import streamlit as st
 from openai import OpenAI
@@ -504,6 +505,7 @@ class ArticleGenerator:
         so the rate-limit state (``_last_reader_call``) is preserved.
 
         Bug #4 fix: sources are deduplicated by URL before returning.
+        TASK-213-followup: sources are also deduplicated by domain.
 
         Returns:
             ``(raw_content, sources)``. Both empty on failure.
@@ -539,7 +541,7 @@ class ArticleGenerator:
                     raw_content = auto_content
                     sources = auto_sources
 
-        # Bug #4: dedupe sources by URL after merging
+        # Bug #4 + TASK-213-followup: dedupe by URL and by domain
         return raw_content, self._dedupe_sources(sources)
 
     # ------------------------------------------------------------------
@@ -549,22 +551,36 @@ class ArticleGenerator:
     def _dedupe_sources(
         sources: List[Dict[str, str]]
     ) -> List[Dict[str, str]]:
-        """Remove duplicate sources by URL, preserving order.
+        """Remove duplicate sources by URL AND by domain (max 1 per domain).
 
         Bug #4 fix: in Hybrid mode the same URL may appear both in the manual
         list and in the Jina SERP, which caused duplicate citations in the
         article.
+
+        TASK-213-followup: domain-level dedup ensures diverse sources so the
+        article doesn't rely on a single site (e.g. n8n.io + github.com/n8n-io).
         """
         if not sources:
             return []
-        seen: set = set()
+
+        seen_urls: set = set()
+        seen_domains: set = set()
         result: List[Dict[str, str]] = []
+
         for s in sources:
             url = (s.get("url") or "").strip()
-            if not url or url in seen:
+            if not url or url in seen_urls:
                 continue
-            seen.add(url)
+
+            domain = urlparse(url).netloc.lower()
+            if domain and domain in seen_domains:
+                continue  # skip same-domain source
+
+            seen_urls.add(url)
+            if domain:
+                seen_domains.add(domain)
             result.append(s)
+
         return result
 
     @staticmethod
