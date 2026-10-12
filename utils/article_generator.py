@@ -20,6 +20,11 @@ Language handling:
     - Cleaner runs ONCE.
     - Writer + Teasers run ONCE PER target language.
     - For "Both", articles share a common ``translation_id`` (uuid).
+
+Model notes:
+    - GPT-5.x models require ``max_completion_tokens`` (not ``max_tokens``).
+    - GPT-5.x models reject custom ``temperature``; only the default is
+      accepted, so the parameter is omitted entirely.
 """
 import json
 import logging
@@ -65,10 +70,6 @@ TEASER_MODEL = "gpt-5.6-sol"
 CLEANER_MAX_TOKENS = 2000
 WRITER_MAX_TOKENS = 3000
 TEASER_MAX_TOKENS = 1000
-
-CLEANER_TEMPERATURE = 0.3
-WRITER_TEMPERATURE = 0.7
-TEASER_TEMPERATURE = 0.8
 
 MAX_RAW_CONTENT_CHARS = 12000
 MAX_CLEANED_CONTENT_CHARS = 6000
@@ -119,14 +120,16 @@ class ArticleGenerator:
         model: str,
         prompt: str,
         max_tokens: int,
-        temperature: float,
         stage: str,
     ) -> Optional[str]:
+        """Call the OpenAI Chat Completions API and return the text content.
+
+        Note: GPT-5.x rejects custom temperature, so it is not sent.
+        """
         try:
             response = self.client.chat.completions.create(
                 model=model,
                 max_completion_tokens=max_tokens,  # GPT-5.x requires this param
-                temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
             content = response.choices[0].message.content
@@ -145,7 +148,6 @@ class ArticleGenerator:
         model: str,
         prompt: str,
         max_tokens: int,
-        temperature: float,
         stage: str,
         max_retries: int = 1,
     ) -> Optional[Dict[str, Any]]:
@@ -155,7 +157,6 @@ class ArticleGenerator:
                 model=model,
                 prompt=prompt,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 stage=stage,
             )
             if raw is None:
@@ -212,7 +213,6 @@ class ArticleGenerator:
             model=CLEANER_MODEL,
             prompt=prompt,
             max_tokens=CLEANER_MAX_TOKENS,
-            temperature=CLEANER_TEMPERATURE,
             stage="Cleaner",
         )
         if not result or not result.get("cleaned_content"):
@@ -269,7 +269,6 @@ class ArticleGenerator:
             model=WRITER_MODEL,
             prompt=prompt,
             max_tokens=WRITER_MAX_TOKENS,
-            temperature=WRITER_TEMPERATURE,
             stage=f"Writer/{category}/{language}",
         )
         if not result:
@@ -310,7 +309,6 @@ class ArticleGenerator:
             model=TEASER_MODEL,
             prompt=prompt,
             max_tokens=TEASER_MAX_TOKENS,
-            temperature=TEASER_TEMPERATURE,
             stage=f"Teasers/{category}/{language}",
         )
         if not result:
