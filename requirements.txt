@@ -1,3 +1,13 @@
-streamlit
-openai
-requests
+# ============================================
+# DOES4U ADMIN — Python dependencies
+# ============================================
+# Install: pip install -r requirements.txt
+# ============================================
+
+streamlit>=1.30.0
+openai>=1.50.0
+requests>=2.31.0
+tavily-python>= 0.5.0
+
+# Content provider: Tavily (optional but required if CONTENT_PROVIDER=tavily)
+tavily-python>=0.5.0

@@ -130,6 +130,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 # BLOG — CITATION INSTRUCTIONS (shared)
 # ============================================
 # Injected into the article prompt. Uses {sources} for the numbered list.
+# Includes a DIVERSITY REQUIREMENT to push the LLM to cite multiple sources.
 # ============================================
 CITATION_INSTRUCTIONS = """CITATIONS REQUIREMENT:
 
@@ -148,6 +149,15 @@ RULES:
 - If a claim is general knowledge (common facts), no citation is needed.
 - Every source that appears in the Sources section MUST have at least one
   inline citation [N] in the body.
+
+DIVERSITY REQUIREMENT:
+- You MUST cite AT LEAST 2 different sources in the article body.
+- Do NOT cite the same source for every claim. Distribute citations across
+  the available sources so the article shows it consulted multiple references.
+- If the same fact appears in multiple sources, cite the most specific one,
+  then add a secondary citation like [1][2] for corroboration.
+- Every source in the AVAILABLE SOURCES list below should ideally be cited
+  at least once.
 
 AVAILABLE SOURCES:
 {sources}"""

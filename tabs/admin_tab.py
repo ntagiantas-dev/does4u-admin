@@ -30,6 +30,12 @@ LANGUAGE_CHOICES: Dict[str, str] = {
 
 CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
 
+# Session-state defaults (set once at first render).
+DEFAULT_STATE = {
+    "content_provider": "jina",
+    "last_gen": None,
+}
+
 
 # ============================================
 # JSON PERSISTENCE
@@ -95,15 +101,6 @@ def create_draft_object(
     translation_id: Optional[str],
     sources: List[Dict[str, str]],
 ) -> Dict:
-    """Build a draft dict ready for JSON storage and FastAPI consumption.
-
-    URL pattern built from this object:
-        /blog/{category_slug}/{slug}/           (en)
-        /el/blog/{category_slug}/{slug}/        (el)
-
-    ``translation_id`` groups GR/EN pairs for hreflang tags.
-    ``sources`` holds the citation list used in the article body.
-    """
     return {
         "id": str(uuid.uuid4()),
         "title": article_data.get("title", "Untitled"),
@@ -214,7 +211,6 @@ def publish_bundles(
 # ============================================
 
 def _parse_urls(raw: str) -> List[str]:
-    """Split a textarea value into a list of clean URLs."""
     if not raw:
         return []
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
@@ -253,14 +249,13 @@ def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
         kws = a.get("keywords") or []
         st.markdown(f"**Keywords:** {', '.join(kws) if kws else '—'}")
 
-        used_sources = a.get("sources") or []
+        used_sources = bundle.get("sources") or []
         if used_sources:
-            st.markdown("**Sources cited:**")
-            for s in used_sources:
-                sid = s.get("id", "?")
+            st.markdown("**Sources used:**")
+            for idx, s in enumerate(used_sources, start=1):
                 title = s.get("title", "") or s.get("url", "")
                 url = s.get("url", "")
-                st.markdown(f"- [{sid}] [{title}]({url})")
+                st.markdown(f"- [{idx}] [{title}]({url})")
 
         st.markdown("---")
         st.markdown(a.get("content_markdown", ""))
@@ -333,8 +328,10 @@ def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
 def render_admin_tab() -> None:
     """Render the three admin tabs (Generate / Drafts / Analytics)."""
 
-    if "last_gen" not in st.session_state:
-        st.session_state["last_gen"] = None
+    # Session-state defaults (FIX 7)
+    for key, value in DEFAULT_STATE.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
     admin_tabs = st.tabs(["📝 Generate Article", "📚 Drafts History", "📊 Analytics"])
 
@@ -360,7 +357,7 @@ def render_admin_tab() -> None:
         language_label = st.selectbox(
             "Language *",
             options=list(LANGUAGE_CHOICES.keys()),
-            index=0,  # Greek-first (D-010)
+            index=0,
             help=(
                 "🌐 Both generates 2 articles (Greek + English) sharing a "
                 "translation_id, for hreflang pairing on the FastAPI site."
@@ -374,10 +371,23 @@ def render_admin_tab() -> None:
             index=0,
             horizontal=True,
             help=(
-                "Auto: Jina search. Manual: your URLs only. "
-                "Hybrid: Jina search + your URLs."
+                "Auto: provider search. Manual: your URLs only. "
+                "Hybrid: provider search + your URLs."
             ),
         )
+
+        # ==================================================
+        # FIX 7: Content provider toggle (only new UI here)
+        # ==================================================
+        provider_choice = st.radio(
+            "Content Provider",
+            options=["jina", "tavily"],
+            index=0,
+            horizontal=True,
+            help="Jina: existing. Tavily: search+extract in one call.",
+        )
+        st.session_state["content_provider"] = provider_choice
+        # ==================================================
 
         urls_input = ""
         if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID):
@@ -398,10 +408,9 @@ def render_admin_tab() -> None:
             else:
                 urls = _parse_urls(urls_input) if urls_input else []
 
-                # Validate URL count for Manual / Hybrid
                 if source_mode == SOURCE_MODE_MANUAL and not urls:
                     st.error("❌ Manual mode requires at least 1 URL.")
-                    return  # Bug #2 fix: return, not st.stop()
+                    return
 
                 if len(urls) > MAX_MANUAL_URLS:
                     st.warning(
@@ -410,7 +419,6 @@ def render_admin_tab() -> None:
                     )
                     urls = urls[:MAX_MANUAL_URLS]
 
-                # ---- Delegate everything to the pipeline ----
                 try:
                     from utils.article_generator import ArticleGenerator
 
@@ -436,6 +444,7 @@ def render_admin_tab() -> None:
                         "category_slug": output.get("category_slug", ""),
                         "target_point": target_point,
                         "source_mode": source_mode,
+                        "provider": st.session_state.get("content_provider", "jina"),
                         "saved": False,
                         "published": False,
                     }
@@ -449,7 +458,10 @@ def render_admin_tab() -> None:
             target_point = gen["target_point"]
             sources = gen.get("sources", [])
 
-            st.success(f"✅ Generated {len(bundles)} article bundle(s) successfully!")
+            provider_label = gen.get("provider", "jina")
+            st.success(
+                f"✅ Generated {len(bundles)} article bundle(s) via **{provider_label}**!"
+            )
             _render_sources_debug(sources)
             _render_cleaner_debug(gen["cleaner"])
 
@@ -522,7 +534,8 @@ def render_admin_tab() -> None:
                         )
                         st.markdown(
                             f"📅 {draft['date']} | 📂 {draft['category']} "
-                            f"| 📝 {draft['word_count']} words | {lang_badge} {draft.get('language','—')}",
+                            f"| 📝 {draft['word_count']} words "
+                            f"| {lang_badge} {draft.get('language','—')}",
                             unsafe_allow_html=True,
                         )
                         st.markdown(f"🎯 Target: {draft['target_point']}")

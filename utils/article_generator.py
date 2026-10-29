@@ -2,34 +2,28 @@
 Article generation pipeline for the does4u admin panel.
 
 Pipeline (self-contained — handles fetch internally):
-    Fetch (Jina search and/or manual URLs)
+    Fetch (via provider abstraction)
         -> Cleaner (language-agnostic)
         -> Writer (per language, per category, with citations)
-        -> Teasers (per language, per category)
+        -> Teasers (per language, per category, with fallback)
+        -> ## Sources section appended programmatically (REPLACES any LLM section)
 
-Categories (see BLOG_CATEGORIES in utils.prompts):
-    - "AI Updates"  : traffic-focused (news/curiosity angle)
-    - "Growth Hack" : conversion-focused (problem/solution angle)
+Provider abstraction: see utils.providers.
+    - JinaProvider: SERP search + per-URL reader.
+    - TavilyProvider: search + extract in one call.
 
 Source modes:
-    - "Auto (Jina)"           : Jina SERP search -> extract top results
-    - "Manual (URLs)"         : user-provided URLs only
-    - "Hybrid (Jina + URLs)"  : user URLs first, then Jina search, merged
-
-Language handling:
-    - Cleaner runs ONCE.
-    - Writer + Teasers run ONCE PER target language.
-    - For "Both", articles share a common ``translation_id`` (uuid).
+    - "Auto (Jina)"           : provider search + extract (domain diversity ON).
+    - "Manual (URLs)"         : user URLs only (domain diversity OFF).
+    - "Hybrid (Jina + URLs)"  : user URLs first (no domain dedup), then
+                                provider search (domain dedup), merged.
 
 Model notes:
-    - All stages currently use a single model: gpt-5.6-luna.
-    - GPT-5.x models require ``max_completion_tokens`` (not ``max_tokens``).
-    - GPT-5.x models reject custom ``temperature``; only the default is
-      accepted, so the parameter is omitted entirely.
-    - GPT-5.x are reasoning models: a large portion of ``max_completion_tokens``
-      is consumed by internal reasoning before any output is produced. Token
-      budgets are therefore generous, and an empty response triggers a single
-      retry with a doubled budget.
+    - All stages use gpt-5.6-luna during the test phase.
+    - GPT-5.x require ``max_completion_tokens`` and reject custom
+      ``temperature``; both are handled in ``_call_llm``.
+    - Teasers may fall back to gpt-4o-mini if Luna returns empty, and further
+      to a sentence-extraction fallback if both fail.
 """
 import json
 import logging
@@ -67,28 +61,91 @@ SOURCE_MODE_HYBRID = "Hybrid (Jina + URLs)"
 SOURCE_MODES = [SOURCE_MODE_AUTO, SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID]
 
 # ============================================
-# MODEL CONFIG — single model across all stages
+# MODEL CONFIG
 # ============================================
 BLOG_MODEL = "gpt-5.6-luna"
 
 CLEANER_MODEL = BLOG_MODEL
 WRITER_MODEL = BLOG_MODEL
 TEASER_MODEL = BLOG_MODEL
+TEASER_FALLBACK_MODEL = "gpt-4o-mini"
 
-# Token budgets (generous — reasoning models consume tokens internally).
 CLEANER_MAX_TOKENS = 4000
 WRITER_MAX_TOKENS = 8000
-TEASER_MAX_TOKENS = 2000
+TEASER_MAX_TOKENS = 8000
+TEASER_FALLBACK_MAX_TOKENS = 1000
 
-# Retry multiplier when the model returns an empty response.
 EMPTY_RESPONSE_RETRY_MULTIPLIER = 2
 
 MAX_RAW_CONTENT_CHARS = 12000
 MAX_CLEANED_CONTENT_CHARS = 6000
-# Bug #3 fix: cap fallback content so we never send the full raw blob to the model.
 FALLBACK_RAW_CONTENT_CHARS = 4000
 
 
+# ============================================
+# MODULE-LEVEL HELPERS
+# ============================================
+def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
+    """Build teasers from the first sentences when the LLM fails.
+
+    Returns the same shape as a successful LLM teaser response so the UI
+    doesn't need to branch.
+    """
+    sentences = [s.strip() for s in article_text.split(".") if s.strip()]
+    first = ". ".join(sentences[:2]) + "." if sentences else ""
+    if not first:
+        first = "Read our latest article."
+
+    return {
+        "twitter": {"text": first[:280], "length": 280},
+        "linkedin": {"text": first[:300], "length": 300},
+        "facebook": {"text": first[:150], "length": 150},
+    }
+
+
+def append_sources_section(
+    article_markdown: str, sources: List[Dict[str, str]]
+) -> str:
+    """Append a '## Sources' section, REPLACING any existing one.
+
+    The LLM often adds its own partial Sources section (sometimes only 1 source
+    even when 5 were provided). We override it programmatically so the final
+    article always lists every fetched source.
+
+    Args:
+        article_markdown: The article body (may already contain '## Sources').
+        sources: The authoritative list of fetched sources.
+
+    Returns:
+        The article with a single, correct '## Sources' section at the end.
+    """
+    # Step 1: Remove any existing Sources section (usually from the LLM).
+    if "## Sources" in article_markdown:
+        idx = article_markdown.find("## Sources")
+        article_markdown = article_markdown[:idx].rstrip()
+
+    if not sources:
+        return article_markdown
+
+    # Step 2: Build the authoritative Sources section.
+    lines: List[str] = ["## Sources"]
+    for s in sources:
+        title = s.get("title") or s.get("url", "Source")
+        url = s.get("url", "")
+        if not url:
+            continue
+        lines.append(f"- [{title}]({url})")
+
+    if len(lines) == 1:
+        # No valid sources after filtering
+        return article_markdown
+
+    return article_markdown.rstrip() + "\n\n" + "\n".join(lines) + "\n"
+
+
+# ============================================
+# MAIN CLASS
+# ============================================
 class ArticleGenerator:
     """Blog article generation pipeline with category + language + sources."""
 
@@ -103,7 +160,6 @@ class ArticleGenerator:
     # ------------------------------------------------------------------
     @staticmethod
     def resolve_languages(selection: str) -> List[Dict[str, str]]:
-        """Map UI language selection to a list of language target dicts."""
         sel = (selection or "").strip().lower()
         if sel in ("both", "bilingual", "el+en", "gr+en"):
             return [LANGUAGE_OPTIONS["greek"], LANGUAGE_OPTIONS["english"]]
@@ -124,6 +180,17 @@ class ArticleGenerator:
         return BLOG_CATEGORIES[category]
 
     # ------------------------------------------------------------------
+    # Provider resolution
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_provider_name() -> Optional[str]:
+        """Read the provider name from Streamlit session state, if available."""
+        try:
+            return st.session_state.get("content_provider")
+        except Exception:  # noqa: BLE001 — script mode / no context
+            return None
+
+    # ------------------------------------------------------------------
     # LLM helpers
     # ------------------------------------------------------------------
     def _call_llm(
@@ -134,14 +201,7 @@ class ArticleGenerator:
         max_tokens: int,
         stage: str,
     ) -> Optional[str]:
-        """Call the OpenAI Chat Completions API and return the text content.
-
-        Empty responses trigger a single retry with a doubled token budget.
-        This is necessary because GPT-5.x reasoning models occasionally consume
-        the entire completion budget on internal reasoning and emit no output.
-
-        Note: GPT-5.x rejects custom temperature, so it is not sent.
-        """
+        """Call OpenAI. Empty response triggers a single retry with 2x budget."""
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -151,10 +211,9 @@ class ArticleGenerator:
             content = response.choices[0].message.content
 
             if not content or not content.strip():
-                # Retry once with a doubled budget.
                 retry_tokens = max_tokens * EMPTY_RESPONSE_RETRY_MULTIPLIER
                 logger.warning(
-                    "[%s] Empty response from %s — retrying with %d tokens",
+                    "[%s] Empty response from %s — retry with %d tokens",
                     stage,
                     model,
                     retry_tokens,
@@ -170,13 +229,7 @@ class ArticleGenerator:
                     logger.error(
                         "[%s] Empty response from %s after retry", stage, model
                     )
-                    st.error(
-                        f"❌ [{stage}] Model returned an empty response twice. "
-                        f"Try a different topic or check the model name."
-                    )
                     return None
-
-                logger.info("[%s] Retry succeeded for %s", stage, model)
 
             return content
         except Exception as exc:  # noqa: BLE001
@@ -207,7 +260,6 @@ class ArticleGenerator:
             if parsed is not None:
                 return parsed
             logger.warning("[%s] JSON parse failed (%d/%d)", stage, attempt, attempts)
-        st.error(f"❌ [{stage}] Failed to parse JSON after {attempts} attempt(s).")
         return None
 
     def _parse_json_response(
@@ -244,7 +296,6 @@ class ArticleGenerator:
     ) -> Optional[Dict[str, Any]]:
         if not raw_content or not raw_content.strip():
             logger.error("[Cleaner] Empty raw content")
-            st.error("❌ [Cleaner] Empty raw content received.")
             return None
 
         prompt = CLEANER_PROMPT.format(
@@ -268,7 +319,7 @@ class ArticleGenerator:
         return result
 
     # ------------------------------------------------------------------
-    # Stage 2 — Writer (per language, per category)
+    # Stage 2 — Writer
     # ------------------------------------------------------------------
     def generate_article(
         self,
@@ -281,7 +332,6 @@ class ArticleGenerator:
     ) -> Optional[Dict[str, Any]]:
         if not cleaned_content or not cleaned_content.strip():
             logger.error("[Writer/%s] Empty cleaned content", language)
-            st.error(f"❌ [Writer/{language}] Empty cleaned content.")
             return None
 
         try:
@@ -317,16 +367,13 @@ class ArticleGenerator:
             return None
         if not result.get("content_markdown"):
             logger.error("[Writer] Missing content_markdown")
-            st.error("❌ [Writer] Response missing 'content_markdown'.")
             return None
         if not result.get("slug"):
             result["slug"] = self._fallback_slug(result.get("title", ""))
-        if not isinstance(result.get("sources"), list):
-            result["sources"] = []
         return result
 
     # ------------------------------------------------------------------
-    # Stage 3 — Teasers
+    # Stage 3 — Teasers (with fallback chain)
     # ------------------------------------------------------------------
     def generate_social_teasers(
         self,
@@ -334,12 +381,14 @@ class ArticleGenerator:
         category: str,
         keywords: List[str],
         language: str = "Greek",
-    ) -> Optional[Dict[str, Any]]:
+        article_text: str = "",
+    ) -> Dict[str, Dict[str, Any]]:
+        """Generate teasers. Never returns None — falls back to text extraction."""
         try:
             cfg = self.get_category_config(category)
         except ValueError as exc:
             st.error(f"❌ {exc}")
-            return None
+            return generate_fallback_teasers(article_text)
 
         prompt = cfg["teaser_prompt"].format(
             title=title or "(untitled)",
@@ -347,22 +396,43 @@ class ArticleGenerator:
             keywords=", ".join(keywords) if keywords else "(none)",
             language=language,
         )
+
+        # Attempt 1: primary model
         result = self._call_llm_json(
             model=TEASER_MODEL,
             prompt=prompt,
             max_tokens=TEASER_MAX_TOKENS,
             stage=f"Teasers/{category}/{language}",
         )
-        if not result:
-            return None
-        for platform in ("twitter", "linkedin", "facebook"):
-            value = result.get(platform)
-            if not isinstance(value, dict) or "text" not in value:
-                logger.warning("[Teasers] Platform %s malformed", platform)
-        return result
+        if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
+            return result
+
+        # Attempt 2: fallback model
+        logger.warning(
+            "[Teasers/%s/%s] Primary model failed, trying %s",
+            category,
+            language,
+            TEASER_FALLBACK_MODEL,
+        )
+        result = self._call_llm_json(
+            model=TEASER_FALLBACK_MODEL,
+            prompt=prompt,
+            max_tokens=TEASER_FALLBACK_MAX_TOKENS,
+            stage=f"Teasers-fallback/{category}/{language}",
+        )
+        if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
+            return result
+
+        # Attempt 3: text fallback
+        logger.warning(
+            "[Teasers/%s/%s] Both models failed — using text fallback",
+            category,
+            language,
+        )
+        return generate_fallback_teasers(article_text)
 
     # ------------------------------------------------------------------
-    # Full pipeline (self-contained — handles fetch)
+    # Full pipeline
     # ------------------------------------------------------------------
     def full_pipeline(
         self,
@@ -372,24 +442,6 @@ class ArticleGenerator:
         language_selection: str = "Greek",
         urls: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Run the full pipeline: fetch -> clean -> write -> teasers.
-
-        Args:
-            target_point: SEO topic.
-            category: One of BLOG_CATEGORIES keys.
-            source_mode: SOURCE_MODE_AUTO / SOURCE_MODE_MANUAL / SOURCE_MODE_HYBRID.
-            language_selection: "Greek" | "English" | "Both".
-            urls: User-provided URLs. Required for Manual, optional for Hybrid.
-
-        Returns:
-            {
-              "cleaner": {...},
-              "sources": [{"url","title","domain"}],
-              "category_slug": "ai-updates" | "growth-hack",
-              "bundles": [ {language, language_name, translation_id,
-                            article, teasers, sources}, ... ],
-            }
-        """
         empty_result: Dict[str, Any] = {
             "cleaner": {},
             "sources": [],
@@ -402,10 +454,9 @@ class ArticleGenerator:
         except ValueError as exc:
             st.error(f"❌ {exc}")
             return empty_result
-
         empty_result["category_slug"] = cfg["slug"]
 
-        # ---- Fetch content (mode-aware) ----
+        # ---- Fetch ----
         raw_content, sources = self._fetch_content(
             source_mode=source_mode,
             target_point=target_point,
@@ -415,16 +466,14 @@ class ArticleGenerator:
             st.error("❌ No content could be fetched. Pipeline aborted.")
             return empty_result
 
-        # ---- Cleaner (once) ----
+        # ---- Cleaner ----
         with st.spinner("🧹 Cleaning content..."):
             cleaner_output = self.clean_content(raw_content, target_point)
 
         if not cleaner_output:
-            # Bug #3 fix: truncate fallback content before sending to the model.
             truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
             logger.warning(
-                "[Pipeline] Cleaner failed — falling back to truncated raw "
-                "content (%d chars)",
+                "[Pipeline] Cleaner failed — fallback to truncated raw (%d chars)",
                 len(truncated),
             )
             st.warning(
@@ -460,16 +509,21 @@ class ArticleGenerator:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)
                 continue
 
+            # Enforce ## Sources section programmatically.
+            # This REPLACES any partial section the LLM may have written.
+            article["content_markdown"] = append_sources_section(
+                article.get("content_markdown", ""),
+                sources,
+            )
+
             with st.spinner(f"📱 Generating teasers ({target['native']})..."):
                 teasers = self.generate_social_teasers(
                     title=article.get("title", ""),
                     category=category,
                     keywords=article.get("keywords") or [],
                     language=lang_name,
+                    article_text=article.get("content_markdown", ""),
                 )
-            if not teasers:
-                logger.error("[Pipeline] Teasers failed for %s", lang_name)
-                continue
 
             bundles.append(
                 {
@@ -478,7 +532,9 @@ class ArticleGenerator:
                     "translation_id": translation_id,
                     "article": article,
                     "teasers": teasers,
-                    "sources": article.get("sources") or sources,
+                    # Always expose the AUTHORITATIVE fetched sources, not the
+                    # (possibly incomplete) list the LLM produced.
+                    "sources": sources,
                 }
             )
 
@@ -490,7 +546,7 @@ class ArticleGenerator:
         }
 
     # ------------------------------------------------------------------
-    # Internal — fetch
+    # Fetch (provider-aware, mode-aware)
     # ------------------------------------------------------------------
     def _fetch_content(
         self,
@@ -499,66 +555,91 @@ class ArticleGenerator:
         target_point: str,
         urls: Optional[List[str]],
     ) -> tuple[str, List[Dict[str, str]]]:
-        """Fetch raw content based on source_mode.
+        """Fetch content via the selected provider, respecting source_mode.
 
-        Bug #5 fix: a single JinaService instance is used across both stages
-        so the rate-limit state (``_last_reader_call``) is preserved.
-
-        Bug #4 fix: sources are deduplicated by URL before returning.
-        TASK-213-followup: sources are also deduplicated by domain.
+        - Manual: only user URLs; domain diversity OFF.
+        - Auto:   provider search; domain diversity ON.
+        - Hybrid: manual (no domain dedup) + auto (domain dedup) merged;
+                  final URL-only dedup to remove cross-mode duplicates.
 
         Returns:
-            ``(raw_content, sources)``. Both empty on failure.
+            (raw_content, sources). Both empty on total failure.
         """
-        # Lazy import to avoid circular imports
-        from utils.jina_service import JinaService
+        from utils.providers import get_provider
 
-        jina = JinaService()  # Bug #5: single instance for rate limit state
+        # Resolve provider (may raise if Tavily selected but not configured)
+        try:
+            provider_name = self._resolve_provider_name()
+            provider = get_provider(name=provider_name)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"❌ Could not initialize content provider: {exc}")
+            return "", []
+
         manual_urls = urls or []
-        raw_content = ""
+        raw_parts: List[str] = []
         sources: List[Dict[str, str]] = []
 
-        # --- Manual URLs (Manual mode, or Hybrid mode) ---
+        # ---- Manual URLs (Manual or Hybrid) ----
         if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID) and manual_urls:
             with st.spinner(f"🔍 Extracting content from {len(manual_urls)} URL(s)..."):
-                merged = jina.extract_multiple(manual_urls, show_errors=True)
-            if merged:
-                raw_content = merged.get("content", "")
-                sources = merged.get("sources", [])
+                manual_extractions: List[Dict[str, Any]] = []
+                for url in manual_urls:
+                    result = provider.extract_from_url(url)
+                    if result:
+                        manual_extractions.append(result)
+                    else:
+                        st.warning(f"⚠️ Could not extract content from: {url}")
 
-        # --- Jina search (Auto mode, or Hybrid mode) ---
+            if manual_extractions:
+                merged_manual = provider.merge_extractions(manual_extractions)
+                manual_sources = self._dedupe_sources(
+                    merged_manual["sources"], enforce_domain_diversity=False
+                )
+                sources.extend(manual_sources)
+                raw_parts.append(merged_manual["content"])
+
+        # ---- Auto search (Auto or Hybrid) ----
         if source_mode in (SOURCE_MODE_AUTO, SOURCE_MODE_HYBRID):
-            with st.spinner("🔍 Searching + extracting (Jina)..."):
-                merged = jina.search_and_extract(target_point)
-            if merged:
-                auto_content = merged.get("content", "")
-                auto_sources = merged.get("sources", [])
-                if raw_content and auto_content:
-                    # Hybrid: manual content first, then auto
-                    raw_content = raw_content + "\n\n---\n\n" + auto_content
-                    sources = sources + auto_sources
-                elif auto_content:
-                    raw_content = auto_content
-                    sources = auto_sources
+            with st.spinner("🔍 Searching + extracting..."):
+                merged_auto = provider.search_and_extract(
+                    target_point, max_results=6
+                )
 
-        # Bug #4 + TASK-213-followup: dedupe by URL and by domain
-        return raw_content, self._dedupe_sources(sources)
+            if merged_auto:
+                auto_sources = self._dedupe_sources(
+                    merged_auto.get("sources", []),
+                    enforce_domain_diversity=True,
+                )
+                # Avoid duplicating manual URLs
+                manual_urls_set = {s.get("url") for s in sources if s.get("url")}
+                auto_sources = [
+                    s for s in auto_sources if s.get("url") not in manual_urls_set
+                ]
+                if auto_sources:
+                    sources.extend(auto_sources)
+                    raw_parts.append(merged_auto.get("content", ""))
+
+        # Final URL-only dedup across all sources
+        sources = self._dedupe_sources(sources, enforce_domain_diversity=False)
+
+        raw_content = "\n\n---\n\n".join(p for p in raw_parts if p)
+        return raw_content, sources
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
     def _dedupe_sources(
-        sources: List[Dict[str, str]]
+        sources: List[Dict[str, str]],
+        enforce_domain_diversity: bool = False,
     ) -> List[Dict[str, str]]:
-        """Remove duplicate sources by URL AND by domain (max 1 per domain).
+        """Remove duplicate sources.
 
-        Bug #4 fix: in Hybrid mode the same URL may appear both in the manual
-        list and in the Jina SERP, which caused duplicate citations in the
-        article.
-
-        TASK-213-followup: domain-level dedup ensures diverse sources so the
-        article doesn't rely on a single site (e.g. n8n.io + github.com/n8n-io).
+        Args:
+            sources: List of {"url", "title", "domain"} dicts.
+            enforce_domain_diversity: If True, allow at most one source per
+                domain (used in Auto mode for credibility diversity). If False,
+                keep all unique URLs (used in Manual mode to honor user choice).
         """
         if not sources:
             return []
@@ -572,25 +653,20 @@ class ArticleGenerator:
             if not url or url in seen_urls:
                 continue
 
-            domain = urlparse(url).netloc.lower()
-            if domain and domain in seen_domains:
-                continue  # skip same-domain source
+            if enforce_domain_diversity:
+                domain = urlparse(url).netloc.lower()
+                if domain and domain in seen_domains:
+                    continue
+                if domain:
+                    seen_domains.add(domain)
 
             seen_urls.add(url)
-            if domain:
-                seen_domains.add(domain)
             result.append(s)
 
         return result
 
     @staticmethod
     def _format_sources_for_prompt(sources: List[Dict[str, str]]) -> str:
-        """Format sources as a numbered list for the citation prompt.
-
-        Example output:
-            [1] Title A - https://example.com/a
-            [2] Title B - https://example.com/b
-        """
         if not sources:
             return "(no sources provided)"
         lines = []
