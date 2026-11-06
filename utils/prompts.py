@@ -1,8 +1,8 @@
 # ============================================
-# DOES4U PROMPTS
+# ΠΡΟΜΠΤ DOES4U
 # ============================================
-# Spyros prompts       — Greek, customer-facing.
-# Blog pipeline         — English instructions, output language configurable.
+# Spyros prompts       — Ελληνικά, customer-facing.
+# Blog pipeline         — Αγγλικά instructions, output language configurable.
 # Blog categories       — AI Updates (traffic) / Growth Hack (conversion).
 # ============================================
 
@@ -100,7 +100,7 @@ FINALIZE_PROMPT = """Μετέτρεψε τα παρακάτω δεδομένα �
 
 
 # ============================================
-# BLOG — CLEANER (language-agnostic)
+# BLOG — CLEANER (γλωσσικά-ουδέτερο)
 # ============================================
 CLEANER_PROMPT = """You are a content cleaner for an SEO blog.
 
@@ -127,37 +127,38 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — CITATION INSTRUCTIONS (shared)
+# BLOG — CITATION INSTRUCTIONS
 # ============================================
-# Injected into the article prompt. Uses {sources} for the numbered list.
-# Includes a DIVERSITY REQUIREMENT to push the LLM to cite multiple sources.
+# Εγχέεται στα article prompts.
+# Χρησιμοποιεί inline Markdown links ΑΝΤΙ για [1], [2] — πιο φυσικό για τον
+# αναγνώστη και πιο σωστό για SEO (external links = authority signals).
+# Απαιτεί υποχρεωτικά ## Sources section στο τέλος.
 # ============================================
-CITATION_INSTRUCTIONS = """CITATIONS REQUIREMENT:
+CITATION_INSTRUCTIONS = """CITATIONS & SOURCES FORMAT:
 
-For EVERY factual claim, statistic, or quote that comes from the provided sources:
-1. Add an inline citation immediately after the claim: [1], [2], [3], etc.
-2. At the end of the article, add a "## Sources" section listing every cited source:
+INLINE CITATIONS — USE MARKDOWN LINKS (ΟΧΙ [1], [2]):
+- Αντί για [1], [2], χρησιμοποίησε inline Markdown links μέσα στο κείμενο.
+- Παράδειγμα: [σύμφωνα με την επίσημη ανακοίνωση](https://url.com).
+- Κάθε factual claim (στατιστικό, απόσπασμα, ημερομηνία, τιμή) πρέπει να
+  συνοδεύεται από inline link στην πηγή του.
+- ΜΗΝ εφεύρεις URLs. Χρησιμοποίησε ΜΟΝΟ όσα περιλαμβάνονται στη λίστα
+  "AVAILABLE SOURCES" παρακάτω.
+- Αν μια πληροφορία είναι κοινή γνώση (π.χ. "η AI αναπτύσσεται ραγδαία"),
+  δεν χρειάζεται citation.
+
+## SOURCES SECTION (ΥΠΟΧΡΕΩΤΙΚΟ):
+Στο ΤΕΛΟΣ του άρθρου, πρόσθεσε ενότητα που ξεκινάει ΑΚΡΙΒΩΣ με `## Sources`
+και περιέχει bullet points με links των πηγών που χρησιμοποίησες:
 
 ## Sources
-[1] Source Title - https://url.com
-[2] Source Title - https://url.com
+- [Τίτλος πηγής](https://url.com)
+- [Τίτλος δεύτερης πηγής](https://url.com)
 
-RULES:
-- ONLY cite sources from the numbered list below.
-- Do NOT invent sources or URLs.
-- Number citations in order of first appearance in the article.
-- If a claim is general knowledge (common facts), no citation is needed.
-- Every source that appears in the Sources section MUST have at least one
-  inline citation [N] in the body.
-
-DIVERSITY REQUIREMENT:
-- You MUST cite AT LEAST 2 different sources in the article body.
-- Do NOT cite the same source for every claim. Distribute citations across
-  the available sources so the article shows it consulted multiple references.
-- If the same fact appears in multiple sources, cite the most specific one,
-  then add a secondary citation like [1][2] for corroboration.
-- Every source in the AVAILABLE SOURCES list below should ideally be cited
-  at least once.
+ΚΑΝΟΝΕΣ:
+- Η ενότητα πρέπει να έχει heading `## Sources` (δύο δίεση + κενό + Sources).
+- Κάθε πηγή σε δικό της bullet point (-).
+- Μορφή: `- [Τίτλος](URL)` — τίτλος σε αγκύλες, URL σε παρενθέσεις.
+- ΜΟΝΟ οι πηγές που πραγματικά citάρες inline πρέπει να εμφανίζονται εδώ.
 
 AVAILABLE SOURCES:
 {sources}"""
@@ -194,15 +195,23 @@ STRUCTURE:
    - What readers should watch next
 6. Conclusion: brief takeaway + soft call-to-action
    (e.g. "Follow for more AI updates" — NOT a sales pitch)
-7. Sources section (if citations were used)
+   + END WITH A SPECIFIC QUESTION: pose an engaging question that invites
+     the reader to reflect on or comment about how this development affects
+     their own business/team. The question must be concrete, NOT generic
+     ("What do you think?" is forbidden).
+7. Sources section (`## Sources` — mandatory, see CITATION instructions)
 8. 5 SEO keywords
 
 FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
 
 LANGUAGE RULES:
-- Write the ENTIRE article in {language}.
-- Translate source content faithfully. Do NOT mix languages.
-- Use natural phrasing — no literal translations.
+- Write the ENTIRE article DIRECTLY in {language}. DO NOT translate —
+  THINK and WRITE as a native {language} journalist.
+- Use natural, journalistic tone. Avoid passive voice and mechanical
+  translations. For Greek, this means: no phrases like
+  "Η νέα έκδοση δεν περιορίζεται..." — write with confidence and directness.
+- Do NOT mix languages within the same article.
+- Do NOT start sentences with "Αξίζει να σημειωθεί ότι..." or similar filler.
 
 SLUG RULES:
 - 3 to 6 words, lowercase, hyphen-separated, ASCII Latin characters only.
@@ -264,15 +273,22 @@ STRUCTURE:
    - A mini case example or realistic scenario with measurable results
 6. Conclusion: strong call-to-action — invite the reader to book a call,
    request a free automation audit, or contact Does4U.
-7. Sources section (if citations were used)
+   + END WITH A SPECIFIC QUESTION: pose a question that makes the reader
+     realize the cost of NOT acting (e.g. "Πόσες ώρες χάνετε κάθε εβδομάδα
+     σε αυτή τη διαδικασία;"). The question must be concrete, NOT generic.
+7. Sources section (`## Sources` — mandatory, see CITATION instructions)
 8. 5 SEO keywords
 
 FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
 
 LANGUAGE RULES:
-- Write the ENTIRE article in {language}.
-- Translate source content faithfully. Do NOT mix languages.
-- Use natural phrasing — no literal translations.
+- Write the ENTIRE article DIRECTLY in {language}. DO NOT translate —
+  THINK and WRITE as a native {language} journalist.
+- Use natural, journalistic tone. Avoid passive voice and mechanical
+  translations. For Greek, this means: no phrases like
+  "Η νέα έκδοση δεν περιορίζεται..." — write with confidence and directness.
+- Do NOT mix languages within the same article.
+- Do NOT start sentences with "Αξίζει να σημειωθεί ότι..." or similar filler.
 
 SLUG RULES:
 - 3 to 6 words, lowercase, hyphen-separated, ASCII Latin characters only.
@@ -325,8 +341,9 @@ REQUIREMENTS:
 - No sales pitch.
 
 LANGUAGE RULES:
-- Write ALL teasers in {language}.
+- Write ALL teasers DIRECTLY in {language}, as a native writer.
 - Do NOT mix languages.
+- Avoid mechanical translations.
 
 STRICT LENGTH LIMITS:
 - twitter: max 280 characters
@@ -365,8 +382,9 @@ REQUIREMENTS:
 - Do not oversell — stay credible.
 
 LANGUAGE RULES:
-- Write ALL teasers in {language}.
+- Write ALL teasers DIRECTLY in {language}, as a native writer.
 - Do NOT mix languages.
+- Avoid mechanical translations.
 
 STRICT LENGTH LIMITS:
 - twitter: max 280 characters

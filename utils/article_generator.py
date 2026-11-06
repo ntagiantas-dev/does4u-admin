@@ -1,7 +1,26 @@
 """
-Article generation pipeline (v4.0, D-020 — primary-source-only).
+Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.0, D-020).
 
-v4.2: διατήρηση snippet από provider sources (Deep Research preview).
+PRIMARY-SOURCE-ONLY pipeline:
+    Fetch (ακριβώς 1 πρωτογενής πηγή)
+        -> Cleaner (καθαρισμός περιεχομένου)
+        -> Writer (Sol — φυσικό ελληνικό ύφος + inline citations)
+        -> Teasers (Sol, fallback σε 4o-mini)
+        -> ## Sources section (programmatic append)
+
+Ingestion modes:
+    - "RSS (today's items)"  : item από watchlist_queue.json.
+    - "Restricted Search"    : SERP περιορισμένο στο domain της εταιρίας.
+    - "Manual URL"           : URL που δίνει ο χρήστης.
+
+Companies από config/sources.yaml (whitelist 10 AI εταιριών).
+Providers: utils.providers (Jina / Tavily).
+
+Model notes (v4.0):
+    - BLOG_MODEL = gpt-5.6-sol — καλύτερη ποιότητα γραψίματος, φυσικό ύφος,
+      σωστή διαχείριση citations. Κόστος ~10x από luna, αλλά αμελητέο για
+      1 άρθρο/ημέρα.
+    - TEASER_FALLBACK_MODEL = gpt-4o-mini — φθηνό fallback αν ο Sol αποτύχει.
 """
 import json
 import logging
@@ -45,7 +64,10 @@ INGESTION_MODES = [
 # ============================================
 # ΜΟΝΤΕΛΑ
 # ============================================
-BLOG_MODEL = "gpt-5.6-luna"
+# v4.0: ΑΛΛΑΓΗ ΣΕ SOL. Ο Sol γράφει με φυσικό δημοσιογραφικό ύφος,
+# διαχειρίζεται σωστά τα inline citations (markdown links) και ακολουθεί
+# πιστά το ## Sources format. Αξίζει το κόστος για premium περιεχόμενο.
+BLOG_MODEL = "gpt-5.6-sol"
 
 CLEANER_MODEL = BLOG_MODEL
 WRITER_MODEL = BLOG_MODEL
@@ -84,7 +106,12 @@ def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
 def append_sources_section(
     article_markdown: str, sources: List[Dict[str, str]]
 ) -> str:
-    """Προσάρτηση ## Sources, αντικαθιστώντας τυχόν υπάρχον."""
+    """Προσάρτηση ## Sources section, αντικαθιστώντας τυχόν υπάρχον.
+
+    Αν ο LLM έγραψε δικό του ## Sources, το αφαιρούμε και βάζουμε το
+    authoritative (fetched) — έτσι εγγυόμαστε ότι δεν υπάρχουν
+    hallucinated URLs στο τέλος.
+    """
     if "## Sources" in article_markdown:
         idx = article_markdown.find("## Sources")
         article_markdown = article_markdown[:idx].rstrip()
@@ -110,7 +137,7 @@ def append_sources_section(
 # ΚΥΡΙΑ ΚΛΑΣΗ
 # ============================================
 class ArticleGenerator:
-    """Pipeline δημιουργίας άρθρου (primary-source-only)."""
+    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.0)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -160,6 +187,7 @@ class ArticleGenerator:
         max_tokens: int,
         stage: str,
     ) -> Optional[str]:
+        """Κλήση OpenAI. Empty response -> 1 retry με 2x budget."""
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -475,6 +503,7 @@ class ArticleGenerator:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)
                 continue
 
+            # Εγγύηση ## Sources section (αντικαθιστά τυχόν LLM-generated)
             article["content_markdown"] = append_sources_section(
                 article.get("content_markdown", ""),
                 sources,
@@ -510,7 +539,7 @@ class ArticleGenerator:
         }
 
     # ------------------------------------------------------------------
-    # Fetch (v4.2 — snippet-aware)
+    # Fetch (1 πρωτογενής πηγή)
     # ------------------------------------------------------------------
     def _fetch_content(
         self,
@@ -520,7 +549,7 @@ class ArticleGenerator:
         company_key: str,
         feed_item_url: Optional[str] = None,
     ) -> tuple[str, List[Dict[str, str]]]:
-        """Fetch 1 source. v4.2: sources περιέχουν snippet όπου είναι εφικτό."""
+        """Fetch 1 source βάσει ingestion_mode."""
         from utils.providers import get_provider
         from utils.sources import get_company
 
@@ -585,7 +614,7 @@ class ArticleGenerator:
                 st.error(f"❌ No results for {target_point!r} on {primary}.")
                 return "", []
 
-            # v4.0: 1 source. v4.2: διατηρεί snippet.
+            # 1 source (primary-source-only)
             sources = merged["sources"][:1]
             return merged.get("content", ""), sources
 
@@ -616,6 +645,9 @@ class ArticleGenerator:
         return slug[:80] or "untitled"
 
 
+# ============================================
+# LOCAL TEST ENTRYPOINT
+# ============================================
 if __name__ == "__main__":
     generator = ArticleGenerator()
     output = generator.full_pipeline(
