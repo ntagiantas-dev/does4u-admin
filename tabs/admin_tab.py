@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from collections import defaultdict
 import uuid
 
 from utils.prompts import BLOG_CATEGORIES
@@ -42,62 +43,22 @@ CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
 # ΦΙΛΤΡΑ DEEP RESEARCH
 # ============================================
 URL_BLACKLIST = [
-    "/pricing",
-    "/privacy",
-    "/terms",
-    "/legal",
-    "/docs/",
-    "/support/",
-    "/careers",
-    "/contact",
-    "/about",
-    "/login",
-    "/signup",
-    "/security",
-    "/trust",
-    "/cookie",
-    "/gdpr",
-    "/tos",
+    "/pricing", "/privacy", "/terms", "/legal", "/docs/", "/support/",
+    "/careers", "/contact", "/about", "/login", "/signup", "/security",
+    "/trust", "/cookie", "/gdpr", "/tos",
 ]
 
 URL_WHITELIST = [
-    "/news",
-    "/blog",
-    "/research",
-    "/index",
-    "/articles",
-    "/posts",
-    "/insights",
-    "/updates",
-    "/announcements",
+    "/news", "/blog", "/research", "/index", "/articles", "/posts",
+    "/insights", "/updates", "/announcements",
 ]
 
 GENERIC_TITLES = {
-    "pricing",
-    "privacy",
-    "terms",
-    "contact",
-    "about",
-    "login",
-    "signup",
-    "sign in",
-    "sign up",
-    "home",
-    "homepage",
-    "docs",
-    "documentation",
-    "support",
-    "careers",
-    "legal",
-    "security",
-    "cookie",
-    "cookie policy",
-    "privacy policy",
-    "terms of service",
-    "terms of use",
-    "untitled",
-    "(untitled)",
-    "no title",
+    "pricing", "privacy", "terms", "contact", "about", "login", "signup",
+    "sign in", "sign up", "home", "homepage", "docs", "documentation",
+    "support", "careers", "legal", "security", "cookie", "cookie policy",
+    "privacy policy", "terms of service", "terms of use", "untitled",
+    "(untitled)", "no title",
 }
 
 DEFAULT_STATE = {
@@ -182,6 +143,41 @@ def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
     return [i for i in load_watchlist() if i.get("company_key") == company_key]
 
 
+def delete_watchlist_item(url: str) -> bool:
+    """Διαγραφή ενός item από το watchlist_queue.json.
+
+    Επίσης καθαρίζει το translation cache για το συγκεκριμένο URL.
+    """
+    if not os.path.exists(WATCHLIST_FILE):
+        return False
+    try:
+        with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return False
+
+        original_len = len(items)
+        filtered = [i for i in items if i.get("url") != url]
+
+        if len(filtered) == original_len:
+            return False  # δεν βρέθηκε
+
+        with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(filtered, f, ensure_ascii=False, indent=2)
+
+        # Καθαρισμός translation cache για αυτό το URL
+        cache = st.session_state.get("translations_cache", {})
+        keys_to_delete = [k for k in cache if k.startswith(f"{url}|")]
+        for k in keys_to_delete:
+            del cache[k]
+        st.session_state["translations_cache"] = cache
+
+        return True
+    except Exception as e:
+        st.error(f"Σφάλμα διαγραφής: {e}")
+        return False
+
+
 # ============================================
 # ΜΕΤΑΦΡΑΣΗ
 # ============================================
@@ -189,10 +185,8 @@ def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
 def _get_openai_client():
     if "openai_client" in st.session_state:
         return st.session_state["openai_client"]
-
     try:
         from openai import OpenAI
-
         api_key = st.secrets.get("OPENAI_API_KEY")
         if not api_key:
             return None
@@ -206,16 +200,13 @@ def _get_openai_client():
 def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
     if not text or not text.strip():
         return ""
-
     client = _get_openai_client()
     if client is None:
         return None
-
     prompt = (
         f"Translate the following text to {target_lang}. "
         f"Return ONLY the translation, no explanations, no quotes:\n\n{text}"
     )
-
     try:
         response = client.chat.completions.create(
             model=TRANSLATION_MODEL,
@@ -223,53 +214,42 @@ def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
-        if not content:
-            return None
-        return content.strip()
+        return content.strip() if content else None
     except Exception as e:
         st.warning(f"⚠️ Σφάλμα μετάφρασης: {e}")
         return None
 
 
 def _get_or_create_translation(
-    url: str,
-    title: str,
-    snippet: str,
-    target_lang: str = "Greek",
+    url: str, title: str, snippet: str, target_lang: str = "Greek",
 ) -> Optional[Dict[str, str]]:
     cache = st.session_state.get("translations_cache", {})
     cache_key = f"{url}|{target_lang}"
-
     if cache_key in cache:
         return cache[cache_key]
 
     translated_title = _translate_text(title, target_lang) or title
     translated_snippet = _translate_text(snippet, target_lang) if snippet else ""
 
-    result = {
-        "title": translated_title,
-        "snippet": translated_snippet,
-    }
+    result = {"title": translated_title, "snippet": translated_snippet}
     cache[cache_key] = result
     st.session_state["translations_cache"] = cache
     return result
 
 
 # ============================================
-# ΦΙΛΤΡΑ DEEP RESEARCH — ΣΥΝΑΡΤΗΣΕΙΣ
+# ΦΙΛΤΡΑ DEEP RESEARCH
 # ============================================
 
 def _is_article_url(url: str) -> bool:
     if not url:
         return False
-
     parsed = urlparse(url)
     path = (parsed.path or "/").lower()
 
     for blocked in URL_BLACKLIST:
         if blocked in path:
             return False
-
     for allowed in URL_WHITELIST:
         if allowed in path:
             return True
@@ -283,22 +263,18 @@ def _is_article_url(url: str) -> bool:
         last = segments[-1]
         if len(last) >= 15 and "-" in last:
             return True
-
     return False
 
 
 def _is_valid_article_title(title: str) -> bool:
     if not title or not title.strip():
         return False
-
     normalized = title.strip().lower()
     if normalized in GENERIC_TITLES:
         return False
-
     words = [w for w in normalized.split() if w.strip()]
     if len(words) < 3:
         return False
-
     return True
 
 
@@ -307,14 +283,11 @@ def _filter_research_results(
 ) -> Tuple[List[Dict[str, str]], int]:
     if not results:
         return [], 0
-
     filtered: List[Dict[str, str]] = []
     rejected = 0
-
     for r in results:
         url = r.get("url") or ""
         title = r.get("title") or ""
-
         if not _is_article_url(url):
             rejected += 1
             continue
@@ -322,7 +295,6 @@ def _filter_research_results(
             rejected += 1
             continue
         filtered.append(r)
-
     return filtered, rejected
 
 
@@ -331,14 +303,9 @@ def _filter_research_results(
 # ============================================
 
 def create_draft_object(
-    article_data: Dict,
-    teasers_data: Dict,
-    target_point: str,
-    category: str,
-    category_slug: str,
-    language: str,
-    translation_id: Optional[str],
-    sources: List[Dict[str, str]],
+    article_data: Dict, teasers_data: Dict, target_point: str,
+    category: str, category_slug: str, language: str,
+    translation_id: Optional[str], sources: List[Dict[str, str]],
     company_key: str,
 ) -> Dict:
     return {
@@ -398,21 +365,15 @@ def delete_draft(draft_id: str) -> bool:
 
 
 def save_bundles_as_drafts(
-    bundles: List[Dict[str, Any]],
-    target_point: str,
-    category: str,
-    category_slug: str,
-    company_key: str,
+    bundles: List[Dict[str, Any]], target_point: str, category: str,
+    category_slug: str, company_key: str,
 ) -> bool:
     drafts = load_drafts()
     new_drafts = [
         create_draft_object(
-            article_data=b["article"],
-            teasers_data=b["teasers"],
-            target_point=target_point,
-            category=category,
-            category_slug=category_slug,
-            language=b["language"],
+            article_data=b["article"], teasers_data=b["teasers"],
+            target_point=target_point, category=category,
+            category_slug=category_slug, language=b["language"],
             translation_id=b["translation_id"],
             sources=b.get("sources") or [],
             company_key=b.get("company_key") or company_key,
@@ -426,21 +387,15 @@ def save_bundles_as_drafts(
 
 
 def publish_bundles(
-    bundles: List[Dict[str, Any]],
-    target_point: str,
-    category: str,
-    category_slug: str,
-    company_key: str,
+    bundles: List[Dict[str, Any]], target_point: str, category: str,
+    category_slug: str, company_key: str,
 ) -> bool:
     blog = load_blog()
     for b in bundles:
         draft = create_draft_object(
-            article_data=b["article"],
-            teasers_data=b["teasers"],
-            target_point=target_point,
-            category=category,
-            category_slug=category_slug,
-            language=b["language"],
+            article_data=b["article"], teasers_data=b["teasers"],
+            target_point=target_point, category=category,
+            category_slug=category_slug, language=b["language"],
             translation_id=b["translation_id"],
             sources=b.get("sources") or [],
             company_key=b.get("company_key") or company_key,
@@ -455,11 +410,7 @@ def publish_bundles(
 # DEEP RESEARCH
 # ============================================
 
-def _deep_research(
-    provider,
-    query: str,
-    site: str,
-) -> Tuple[List[Dict[str, str]], int]:
+def _deep_research(provider, query: str, site: str) -> Tuple[List[Dict[str, str]], int]:
     if not query or not query.strip():
         return [], 0
 
@@ -468,9 +419,7 @@ def _deep_research(
     exact_query = f'"{query}"'
     try:
         merged_a = provider.search_and_extract(
-            exact_query,
-            max_results=10,
-            site=site,
+            exact_query, max_results=10, site=site,
             max_sources=DEEP_RESEARCH_MAX_CANDIDATES,
         )
         if merged_a and merged_a.get("sources"):
@@ -483,9 +432,7 @@ def _deep_research(
 
     try:
         merged_b = provider.search_and_extract(
-            query,
-            max_results=10,
-            site=site,
+            query, max_results=10, site=site,
             max_sources=DEEP_RESEARCH_MAX_CANDIDATES,
         )
         if merged_b and merged_b.get("sources"):
@@ -506,10 +453,7 @@ def _deep_research(
 # ============================================
 
 def _set_pending_generation(
-    url: str,
-    company_key: str,
-    target_point: str,
-    title: str,
+    url: str, company_key: str, target_point: str, title: str,
 ) -> None:
     st.session_state["pending_feed_item_url"] = url
     st.session_state["pending_company_key"] = company_key
@@ -523,12 +467,9 @@ def _render_news_card(
     target_point: str,
     company_key: Optional[str] = None,
     button_key_prefix: str = "gen",
+    show_delete: bool = False,
 ) -> None:
-    """Κάρτα ειδήσεων με snippet + Μετάφραση + Generate + Open Original.
-
-    v4.2: snippet fallback chain = snippet -> summary -> description.
-    Αν λείπει όλο το chain, δεν εμφανίζεται τίποτα (δεν σπάει).
-    """
+    """Κάρτα ειδήσεων με Μετάφραση + Generate + (προαιρετικά) Διαγραφή."""
     company_name = (
         item.get("company_name")
         or item.get("company_key", "")
@@ -539,7 +480,6 @@ def _render_news_card(
     title = item.get("title") or "(χωρίς τίτλο)"
     url = item.get("url") or ""
 
-    # v4.2: snippet fallback chain
     snippet = (
         item.get("snippet")
         or item.get("summary")
@@ -561,11 +501,11 @@ def _render_news_card(
         # 2. Caption
         st.caption(f"{company_name} | {published}")
 
-        # 3. Αγγλικός τίτλος (italic, μόνο αν μεταφρασμένο)
+        # 3. Αγγλικός τίτλος
         if translated:
             st.caption(f"🇬🇧 *{title}*")
 
-        # 4. Snippet (ή μετάφραση)
+        # 4. Snippet
         if snippet:
             if translated and translated.get("snippet"):
                 st.write(translated["snippet"])
@@ -573,8 +513,11 @@ def _render_news_card(
             else:
                 st.write(snippet)
 
-        # 5. Κουμπιά
-        col1, col2, col3 = st.columns([1, 1, 2])
+        # 5. Κουμπιά — 3 στήλες αν show_delete, αλλιώς 2
+        if show_delete:
+            col1, col2, col3 = st.columns([1, 1, 1])
+        else:
+            col1, col2, col3 = st.columns([1, 1, 2])
 
         with col1:
             if translated:
@@ -609,6 +552,19 @@ def _render_news_card(
                     "✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**."
                 )
 
+        if show_delete:
+            with col3:
+                if st.button(
+                    "🗑️ Διαγραφή",
+                    key=f"del_{button_key_prefix}_{url}",
+                    help="Διαγραφή από το queue",
+                ):
+                    if delete_watchlist_item(url):
+                        st.success("✅ Διαγράφηκε")
+                        st.rerun()
+                    else:
+                        st.error("❌ Αποτυχία διαγραφής")
+
         # 6. Open Original
         if url:
             st.markdown(f"[🔗 Open Original]({url})")
@@ -617,9 +573,7 @@ def _render_news_card(
 def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
     a = bundle["article"]
     with st.container(border=True):
-        st.markdown(
-            f"### 📄 Άρθρο — {bundle['language_name']} ({bundle['language']})"
-        )
+        st.markdown(f"### 📄 Άρθρο — {bundle['language_name']} ({bundle['language']})")
         if bundle.get("translation_id"):
             st.caption(f"🔗 translation_id: `{bundle['translation_id']}`")
         st.markdown(f"**Τίτλος:** {a.get('title', '—')}")
@@ -726,8 +680,8 @@ def render_admin_tab() -> None:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
         st.markdown("<h2>📥 Inbox & Research</h2>", unsafe_allow_html=True)
 
-        # ---------------- Section A: Fresh News (RSS) ----------------
-        st.markdown("### 📰 Fresh News (τελευταίες 48 ώρες)")
+        # ---------------- Section A: Fresh News (ομαδοποιημένο) ----------------
+        st.markdown("### 📰 Fresh News (ανά εταιρία)")
 
         watchlist = load_watchlist()
         watchlist.sort(
@@ -741,12 +695,42 @@ def render_admin_tab() -> None:
                 "ή χρησιμοποίησε το Deep Research πιο κάτω."
             )
         else:
+            # Ομαδοποίηση ανά εταιρία
+            by_company: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for item in watchlist:
-                _render_news_card(
-                    item,
-                    target_point=item.get("title") or "",
-                    button_key_prefix="rss",
-                )
+                ck = item.get("company_key") or "unknown"
+                by_company[ck].append(item)
+
+            company_map = {c.key: c.display_name for c in list_companies()}
+
+            # Ταξινόμηση εταιριών αλφαβητικά
+            sorted_company_keys = sorted(
+                by_company.keys(),
+                key=lambda k: company_map.get(k, k).lower(),
+            )
+
+            st.markdown(
+                f"**Σύνολο: {len(watchlist)} items από {len(by_company)} εταιρίες**"
+            )
+            st.caption(
+                "💡 Κάθε εταιρία σε δικό της expander. Πάτα 🗑️ για να διαγράψεις "
+                "ένα item που δεν σε ενδιαφέρει."
+            )
+
+            for ck in sorted_company_keys:
+                items = by_company[ck]
+                company_name = company_map.get(ck, ck)
+                with st.expander(
+                    f"🏢 {company_name} — {len(items)} items",
+                    expanded=False,
+                ):
+                    for item in items:
+                        _render_news_card(
+                            item,
+                            target_point=item.get("title") or "",
+                            button_key_prefix=f"rss_{ck}",
+                            show_delete=True,
+                        )
 
         st.markdown("---")
 
@@ -759,14 +743,14 @@ def render_admin_tab() -> None:
         )
 
         companies = list_companies()
-        company_map = {c.key: c.display_name for c in companies}
+        company_map_dr = {c.key: c.display_name for c in companies}
 
         col1, col2 = st.columns([2, 3])
         with col1:
             research_company_key = st.selectbox(
                 "Εταιρία",
-                options=list(company_map.keys()),
-                format_func=lambda k: company_map[k],
+                options=list(company_map_dr.keys()),
+                format_func=lambda k: company_map_dr[k],
                 key="research_company_select",
             )
         with col2:
@@ -801,7 +785,6 @@ def render_admin_tab() -> None:
                         )
                         try:
                             from utils.providers import get_provider
-
                             provider = get_provider(name=provider_name)
                         except Exception as e:
                             st.error(f"❌ Σφάλμα provider: {e}")
@@ -822,9 +805,8 @@ def render_admin_tab() -> None:
                                 if rejected > 0:
                                     st.warning(
                                         f"⚠️ Βρέθηκαν {rejected} αποτελέσματα, "
-                                        f"αλλά **όλα** φιλτραρίστηκαν ως μη-άρθρα "
-                                        f"(pricing/privacy/untitled). Δοκίμασε "
-                                        f"πιο συγκεκριμένη λέξη-κλειδί."
+                                        f"αλλά **όλα** φιλτραρίστηκαν ως μη-άρθρα. "
+                                        f"Δοκίμασε πιο συγκεκριμένη λέξη-κλειδί."
                                     )
                                 else:
                                     st.warning(
@@ -855,20 +837,20 @@ def render_admin_tab() -> None:
                 f"η πηγή του άρθρου:"
             )
             for src in research_results:
-                # v4.2: περνάει το snippet από το src dict στην κάρτα
                 _render_news_card(
                     {
                         "title": src.get("title") or src.get("url"),
                         "url": src.get("url"),
                         "snippet": src.get("snippet", ""),
                         "company_key": research_company_key_stored,
-                        "company_name": company_map.get(
+                        "company_name": company_map_dr.get(
                             research_company_key_stored or "", ""
                         ),
                     },
                     target_point=research_query_stored or "",
                     company_key=research_company_key_stored,
                     button_key_prefix="research",
+                    show_delete=False,  # Deep Research → όχι delete
                 )
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -954,15 +936,11 @@ def render_admin_tab() -> None:
 
         if ingestion_mode == INGESTION_MODE_RSS:
             if not company.has_rss:
-                st.warning(
-                    f"⚠️ Η {company.display_name} δεν έχει RSS feed."
-                )
+                st.warning(f"⚠️ Η {company.display_name} δεν έχει RSS feed.")
             else:
                 items = load_watchlist_for_company(company_key)
                 if not items:
-                    st.info(
-                        f"📭 Δεν υπάρχουν items για {company.display_name}."
-                    )
+                    st.info(f"📭 Δεν υπάρχουν items για {company.display_name}.")
                 else:
                     idx = st.selectbox(
                         f"Feed item ({len(items)} διαθέσιμα) *",
@@ -1023,7 +1001,6 @@ def render_admin_tab() -> None:
             else:
                 try:
                     from utils.article_generator import ArticleGenerator
-
                     generator = ArticleGenerator()
                 except Exception as e:
                     st.error(f"❌ Σφάλμα αρχικοποίησης ArticleGenerator: {e}")
@@ -1096,11 +1073,8 @@ def render_admin_tab() -> None:
                     disabled=gen.get("saved") or gen.get("published"),
                 ):
                     if save_bundles_as_drafts(
-                        bundles,
-                        target_point_v,
-                        category_v,
-                        category_slug,
-                        company_key_v,
+                        bundles, target_point_v, category_v,
+                        category_slug, company_key_v,
                     ):
                         gen["saved"] = True
                         st.success(f"✅ Αποθηκεύτηκαν {len(bundles)} draft(s).")
@@ -1113,11 +1087,8 @@ def render_admin_tab() -> None:
                     disabled=gen.get("published"),
                 ):
                     if publish_bundles(
-                        bundles,
-                        target_point_v,
-                        category_v,
-                        category_slug,
-                        company_key_v,
+                        bundles, target_point_v, category_v,
+                        category_slug, company_key_v,
                     ):
                         gen["published"] = True
                         st.success(f"✅ Δημοσιεύτηκαν {len(bundles)} άρθρα!")

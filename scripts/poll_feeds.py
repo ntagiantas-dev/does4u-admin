@@ -1,10 +1,8 @@
 """
 Poll RSS feeds + Google News RSS fallback για το does4u admin.
 
-Διορθώσεις v4.0.1:
-    - Προσθήκη User-Agent header (αποφυγή μπλοκαρίσματος από sites)
-    - Google News: φιλτράρουμε με βάση το entry.source, όχι το redirect URL
-    - Χρήση requests για κατέβασμα, μετά feedparser.parse()
+v4.0.2:
+    - Retention limit MAX_ITEMS_IN_QUEUE = 2000 (trim παλιών)
 """
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-# Βεβαιωνόμαστε ότι το project root είναι στο sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -37,9 +34,10 @@ from utils.sources import Company, list_companies  # noqa: E402
 QUEUE_FILE = _PROJECT_ROOT / "watchlist_queue.json"
 
 MAX_AGE_DAYS = 90
+# v4.0.2: σκληρό όριο items (trim παλιών). 2000 ≈ 5-6 βδομάδες ιστορικό.
+MAX_ITEMS_IN_QUEUE = 2000
 SUMMARY_MAX_CHARS = 1000
 
-# User-Agent — απαραίτητο για πολλά sites
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -55,11 +53,6 @@ GOOGLE_NEWS_RSS_TEMPLATE = (
 # ΒΟΗΘΗΤΙΚΕΣ
 # ============================================
 def _fetch_feed(url: str) -> Any:
-    """Κατέβασμα feed με User-Agent, μετά parsing.
-
-    Χρησιμοποιούμε requests (με headers) αντί για feedparser.parse(url)
-    απευθείας, γιατί πολλά sites μπλοκάρουν requests χωρίς User-Agent.
-    """
     try:
         response = requests.get(
             url,
@@ -106,12 +99,6 @@ def _is_from_company_domain(url: str, domains: List[str]) -> bool:
 
 
 def _get_entry_source_domain(entry: Any) -> Optional[str]:
-    """Εξαγωγή domain από το <source> του entry (Google News).
-
-    Το Google News RSS έχει:
-        <source url="https://www.reuters.com">Reuters</source>
-    Αυτό είναι το πραγματικό domain, όχι το redirect URL.
-    """
     source = getattr(entry, "source", None)
     if source and hasattr(source, "href"):
         return _extract_domain(source.href)
@@ -119,17 +106,10 @@ def _get_entry_source_domain(entry: Any) -> Optional[str]:
 
 
 def _resolve_google_news_url(entry: Any) -> str:
-    """Προσπάθεια εξαγωγής πραγματικού URL από Google News entry.
-
-    Το entry.link είναι πάντα redirect (news.google.com/rss/articles/...).
-    Δεν μπορούμε να το λύσουμε χωρίς extra request, οπότε το κρατάμε ως έχει.
-    Ο χρήστης θα κάνει ένα παραπάνω click, αλλά δουλεύει.
-    """
     return entry.get("link", "") or ""
 
 
 def _poll_company(company: Company, cutoff: datetime) -> List[Dict[str, Any]]:
-    """Fetch feeds για μια εταιρία (RSS ή Google News fallback)."""
     feeds_to_poll: List[str] = []
 
     if company.has_rss and company.feeds:
@@ -162,12 +142,10 @@ def _poll_company(company: Company, cutoff: datetime) -> List[Dict[str, Any]]:
                 continue
 
             if is_google_news:
-                # Έλεγχος domain από το entry.source (πραγματικό domain)
                 source_domain = _get_entry_source_domain(entry)
                 if source_domain and not _is_from_company_domain(
                     f"https://{source_domain}", company.domains
                 ):
-                    # Είναι aggregator (reuters, techcrunch κλπ) — skip
                     continue
                 url = _resolve_google_news_url(entry)
             else:
@@ -213,7 +191,7 @@ def _load_existing_queue() -> List[Dict[str, Any]]:
 # ΚΥΡΙΩΣ
 # ============================================
 def main() -> int:
-    print(f"Polling feeds (max age {MAX_AGE_DAYS} days)...")
+    print(f"Polling feeds (max age {MAX_AGE_DAYS} days, max items {MAX_ITEMS_IN_QUEUE})...")
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
 
     existing_items = _load_existing_queue()
@@ -262,10 +240,21 @@ def main() -> int:
 
     print(f"Items που έληξαν (>{MAX_AGE_DAYS} μέρες): {expired_count}")
 
+    # Ταξινόμηση: νέα πρώτα
     retained_items.sort(
         key=lambda i: i.get("published_at") or "",
         reverse=True,
     )
+
+    # v4.0.2: Σκληρό όριο — trim παλιών αν ξεπεράσουμε το MAX_ITEMS_IN_QUEUE
+    trimmed_count = 0
+    if len(retained_items) > MAX_ITEMS_IN_QUEUE:
+        trimmed_count = len(retained_items) - MAX_ITEMS_IN_QUEUE
+        retained_items = retained_items[:MAX_ITEMS_IN_QUEUE]
+        print(
+            f"Trimmed {trimmed_count} παλιά items "
+            f"(όριο: {MAX_ITEMS_IN_QUEUE})"
+        )
 
     QUEUE_FILE.write_text(
         json.dumps(retained_items, ensure_ascii=False, indent=2),
@@ -273,7 +262,11 @@ def main() -> int:
     )
 
     print(f"\n✅ Εγγράφηκαν {len(retained_items)} item(s) στο {QUEUE_FILE}")
-    print(f"   (από τα οποία {added_count} νέα, {len(retained_items) - added_count} υπάρχοντα)")
+    print(
+        f"   (από τα οποία {added_count} νέα, "
+        f"{len(retained_items) - added_count} υπάρχοντα, "
+        f"{trimmed_count} trimmed)"
+    )
     return 0
 
 
