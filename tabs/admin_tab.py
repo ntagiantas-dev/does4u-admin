@@ -7,20 +7,27 @@ import uuid
 
 from utils.prompts import BLOG_CATEGORIES
 from utils.article_generator import (
-    SOURCE_MODE_AUTO,
-    SOURCE_MODE_MANUAL,
-    SOURCE_MODE_HYBRID,
-    SOURCE_MODES,
+    INGESTION_MODE_RSS,
+    INGESTION_MODE_RESTRICTED,
+    INGESTION_MODE_MANUAL,
+    INGESTION_MODES,
 )
+from utils.sources import list_companies, get_company
 
 
 # ============================================
-# CONSTANTS
+# ΣΤΑΘΕΡΕΣ
 # ============================================
 DRAFTS_FILE = "drafts.json"
 BLOG_FILE = "blog_data.json"
+WATCHLIST_FILE = "watchlist_queue.json"
 MAX_DRAFTS_IN_HISTORY = 30
-MAX_MANUAL_URLS = 5
+
+DEEP_RESEARCH_MAX_CANDIDATES = 10
+
+# Μοντέλο για μεταφράσεις (φθηνό, γρήγορο)
+TRANSLATION_MODEL = "gpt-4o-mini"
+TRANSLATION_MAX_TOKENS = 500
 
 LANGUAGE_CHOICES: Dict[str, str] = {
     "🇬🇷 Greek": "Greek",
@@ -30,15 +37,23 @@ LANGUAGE_CHOICES: Dict[str, str] = {
 
 CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
 
-# Session-state defaults (set once at first render).
 DEFAULT_STATE = {
     "content_provider": "jina",
     "last_gen": None,
+    "pending_feed_item_url": None,
+    "pending_company_key": None,
+    "pending_target_point": None,
+    "pending_source_title": None,
+    "research_results": None,
+    "research_query": None,
+    "research_company_key": None,
+    # Cache μεταφράσεων: url -> {"title": ..., "summary": ...}
+    "translations_cache": {},
 }
 
 
 # ============================================
-# JSON PERSISTENCE
+# ΑΠΟΘΗΚΕΥΣΗ JSON
 # ============================================
 
 def load_drafts() -> List[Dict]:
@@ -87,6 +102,113 @@ def save_blog(articles: List[Dict]) -> bool:
         return False
 
 
+def load_watchlist() -> List[Dict[str, Any]]:
+    """Φόρτωση όλων των items από το watchlist_queue.json (RSS 48h)."""
+    if not os.path.exists(WATCHLIST_FILE):
+        return []
+    try:
+        with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        return items if isinstance(items, list) else []
+    except json.JSONDecodeError:
+        return []
+    except Exception as e:
+        st.error(f"Error loading watchlist: {str(e)}")
+        return []
+
+
+def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
+    """Φόρτωση items για συγκεκριμένη εταιρία."""
+    return [i for i in load_watchlist() if i.get("company_key") == company_key]
+
+
+# ============================================
+# ΜΕΤΑΦΡΑΣΗ
+# ============================================
+
+def _get_openai_client():
+    """Επιστροφή OpenAI client (cached στο session_state)."""
+    if "openai_client" in st.session_state:
+        return st.session_state["openai_client"]
+
+    try:
+        from openai import OpenAI
+
+        api_key = st.secrets.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        client = OpenAI(api_key=api_key)
+        st.session_state["openai_client"] = client
+        return client
+    except Exception:
+        return None
+
+
+def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
+    """Μετάφραση ενός κειμένου στη target_lang μέσω OpenAI.
+
+    Args:
+        text: Το κείμενο προς μετάφραση.
+        target_lang: Γλώσσα προορισμού ("Greek" ή "English").
+
+    Returns:
+        Μεταφρασμένο κείμενο ή None σε αποτυχία.
+    """
+    if not text or not text.strip():
+        return ""
+
+    client = _get_openai_client()
+    if client is None:
+        return None
+
+    prompt = (
+        f"Translate the following text to {target_lang}. "
+        f"Return ONLY the translation, no explanations, no quotes:\n\n{text}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=TRANSLATION_MODEL,
+            max_completion_tokens=TRANSLATION_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = response.choices[0].message.content
+        if not content:
+            return None
+        return content.strip()
+    except Exception as e:
+        st.warning(f"⚠️ Σφάλμα μετάφρασης: {e}")
+        return None
+
+
+def _get_or_create_translation(
+    url: str,
+    title: str,
+    summary: str,
+    target_lang: str = "Greek",
+) -> Optional[Dict[str, str]]:
+    """Επιστροφή cached μετάφρασης ή δημιουργία νέας.
+
+    Cache key: f"{url}|{target_lang}" — ίδιο URL, ίδια γλώσσα = ίδια μετάφραση.
+    """
+    cache = st.session_state.get("translations_cache", {})
+    cache_key = f"{url}|{target_lang}"
+
+    if cache_key in cache:
+        return cache[cache_key]
+
+    translated_title = _translate_text(title, target_lang) or title
+    translated_summary = _translate_text(summary, target_lang) if summary else ""
+
+    result = {
+        "title": translated_title,
+        "summary": translated_summary,
+    }
+    cache[cache_key] = result
+    st.session_state["translations_cache"] = cache
+    return result
+
+
 # ============================================
 # DRAFT OBJECT
 # ============================================
@@ -100,6 +222,7 @@ def create_draft_object(
     language: str,
     translation_id: Optional[str],
     sources: List[Dict[str, str]],
+    company_key: str,
 ) -> Dict:
     return {
         "id": str(uuid.uuid4()),
@@ -110,6 +233,7 @@ def create_draft_object(
         "reading_time_minutes": article_data.get("reading_time_minutes", 0),
         "category": category,
         "category_slug": category_slug,
+        "company_key": company_key,
         "date": datetime.now().strftime("%Y-%m-%d"),
         "author": "Does4U",
         "language": language,
@@ -129,7 +253,7 @@ def create_draft_object(
 
 
 # ============================================
-# DRAFT LIFECYCLE
+# ΚΥΚΛΟΣ ΖΩΗΣ DRAFT
 # ============================================
 
 def publish_draft(draft: Dict) -> bool:
@@ -161,6 +285,7 @@ def save_bundles_as_drafts(
     target_point: str,
     category: str,
     category_slug: str,
+    company_key: str,
 ) -> bool:
     drafts = load_drafts()
     new_drafts = [
@@ -173,6 +298,7 @@ def save_bundles_as_drafts(
             language=b["language"],
             translation_id=b["translation_id"],
             sources=b.get("sources") or [],
+            company_key=b.get("company_key") or company_key,
         )
         for b in bundles
     ]
@@ -187,6 +313,7 @@ def publish_bundles(
     target_point: str,
     category: str,
     category_slug: str,
+    company_key: str,
 ) -> bool:
     blog = load_blog()
     for b in bundles:
@@ -199,6 +326,7 @@ def publish_bundles(
             language=b["language"],
             translation_id=b["translation_id"],
             sources=b.get("sources") or [],
+            company_key=b.get("company_key") or company_key,
         )
         draft["status"] = "published"
         draft["published_at"] = datetime.now().isoformat()
@@ -207,55 +335,189 @@ def publish_bundles(
 
 
 # ============================================
-# URL PARSING HELPER
+# DEEP RESEARCH
 # ============================================
 
-def _parse_urls(raw: str) -> List[str]:
-    if not raw:
+def _deep_research(
+    provider,
+    query: str,
+    site: str,
+) -> List[Dict[str, str]]:
+    """Βαθύτερη αναζήτηση στο επίσημο site μιας εταιρίας.
+
+    Στρατηγική:
+        1. Query A: exact match `"query"` — πιο ακριβές.
+        2. Query B: loose match (χωρίς quotes) — φέρνει περισσότερα.
+        3. Συνδυασμός + dedupe by URL.
+    """
+    if not query or not query.strip():
         return []
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    seen: set = set()
-    cleaned: List[str] = []
-    for url in lines:
-        if url in seen:
-            continue
-        seen.add(url)
-        cleaned.append(url)
-    return cleaned
+
+    results_by_url: Dict[str, Dict[str, str]] = {}
+
+    exact_query = f'"{query}"'
+    try:
+        merged_a = provider.search_and_extract(
+            exact_query,
+            max_results=10,
+            site=site,
+            max_sources=DEEP_RESEARCH_MAX_CANDIDATES,
+        )
+        if merged_a and merged_a.get("sources"):
+            for s in merged_a["sources"]:
+                url = s.get("url")
+                if url and url not in results_by_url:
+                    results_by_url[url] = s
+    except Exception as exc:
+        st.warning(f"⚠️ Exact-match query απέτυχε: {exc}")
+
+    try:
+        merged_b = provider.search_and_extract(
+            query,
+            max_results=10,
+            site=site,
+            max_sources=DEEP_RESEARCH_MAX_CANDIDATES,
+        )
+        if merged_b and merged_b.get("sources"):
+            for s in merged_b["sources"]:
+                url = s.get("url")
+                if url and url not in results_by_url:
+                    results_by_url[url] = s
+    except Exception as exc:
+        st.warning(f"⚠️ Loose query απέτυχε: {exc}")
+
+    return list(results_by_url.values())[:DEEP_RESEARCH_MAX_CANDIDATES]
 
 
 # ============================================
-# RENDER HELPERS
+# HELPERS RENDERING
 # ============================================
+
+def _set_pending_generation(
+    url: str,
+    company_key: str,
+    target_point: str,
+    title: str,
+) -> None:
+    """Αποθήκευση στοιχείων για το επόμενο βήμα (Generate Article tab)."""
+    st.session_state["pending_feed_item_url"] = url
+    st.session_state["pending_company_key"] = company_key
+    st.session_state["pending_target_point"] = target_point
+    st.session_state["pending_source_title"] = title
+
+
+def _render_news_card(
+    item: Dict[str, Any],
+    *,
+    target_point: str,
+    company_key: Optional[str] = None,
+    button_key_prefix: str = "gen",
+) -> None:
+    """Κάρτα ειδήσεων με κουμπιά Μετάφραση + Generate."""
+    company_name = (
+        item.get("company_name")
+        or item.get("company_key", "")
+        or company_key
+        or "—"
+    )
+    published = (item.get("published_at") or "")[:10] or "—"
+    title = item.get("title") or "(χωρίς τίτλο)"
+    summary = item.get("summary") or item.get("description") or ""
+    url = item.get("url") or ""
+
+    # Έλεγχος αν υπάρχει ήδη μετάφραση
+    cache = st.session_state.get("translations_cache", {})
+    cache_key = f"{url}|Greek"
+    translated = cache.get(cache_key)
+
+    with st.container(border=True):
+        st.caption(f"{company_name} | {published}")
+
+        # -------------- Τίτλος --------------
+        if translated:
+            # Δείχνουμε ΚΑΙ τα δύο: ελληνικό + αγγλικό (σε italic)
+            st.markdown(f"### 🇬🇷 {translated.get('title', title)}")
+            st.caption(f"🇬🇧 *{title}*")
+        else:
+            st.markdown(f"### {title}")
+
+        # -------------- Σύνοψη --------------
+        if summary:
+            if translated and translated.get("summary"):
+                st.write(translated["summary"])
+                st.caption(f"🇬🇧 *{summary[:300]}...*" if len(summary) > 300 else f"🇬🇧 *{summary}*")
+            else:
+                st.write(summary)
+
+        st.caption(f"🔗 {url}")
+
+        # -------------- Κουμπιά --------------
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        with col1:
+            # Κουμπί Μετάφραση / Επαναφορά
+            if translated:
+                if st.button(
+                    "🔄 Επαναφορά",
+                    key=f"untr_{button_key_prefix}_{url}",
+                ):
+                    # Αφαιρούμε τη μετάφραση από το cache για ΑΥΤΟ το URL
+                    cache.pop(cache_key, None)
+                    st.session_state["translations_cache"] = cache
+                    st.rerun()
+            else:
+                if st.button(
+                    "🌐 Μετάφραση",
+                    key=f"tr_{button_key_prefix}_{url}",
+                ):
+                    with st.spinner("🌐 Μετάφραση..."):
+                        _get_or_create_translation(url, title, summary, "Greek")
+                    st.rerun()
+
+        with col2:
+            if st.button(
+                "🚀 Generate",
+                key=f"{button_key_prefix}_{url}",
+            ):
+                _set_pending_generation(
+                    url=url,
+                    company_key=item.get("company_key") or company_key or "",
+                    target_point=target_point or title,
+                    title=title,
+                )
+                st.success(
+                    "✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**."
+                )
+
 
 def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
     a = bundle["article"]
     with st.container(border=True):
         st.markdown(
-            f"### 📄 Article Preview — {bundle['language_name']} ({bundle['language']})"
+            f"### 📄 Άρθρο — {bundle['language_name']} ({bundle['language']})"
         )
         if bundle.get("translation_id"):
             st.caption(f"🔗 translation_id: `{bundle['translation_id']}`")
-        st.markdown(f"**Title:** {a.get('title', '—')}")
+        st.markdown(f"**Τίτλος:** {a.get('title', '—')}")
         if a.get("slug"):
             st.markdown(f"**Slug:** `{a['slug']}`")
         if a.get("meta_description"):
             st.markdown(f"**Meta description:** {a['meta_description']}")
-        st.markdown(f"**Category:** {category}")
+        st.markdown(f"**Κατηγορία:** {category}")
         st.markdown(
-            f"**Word count:** {a.get('word_count', 0)} "
-            f"| **Reading time:** {a.get('reading_time_minutes', 0)} min"
+            f"**Λέξεις:** {a.get('word_count', 0)} "
+            f"| **Χρόνος ανάγνωσης:** {a.get('reading_time_minutes', 0)} λεπτά"
         )
         kws = a.get("keywords") or []
-        st.markdown(f"**Keywords:** {', '.join(kws) if kws else '—'}")
+        st.markdown(f"**Λέξεις-κλειδιά:** {', '.join(kws) if kws else '—'}")
 
         used_sources = bundle.get("sources") or []
         if used_sources:
-            st.markdown("**Sources used:**")
-            for idx, s in enumerate(used_sources, start=1):
+            st.markdown("**Πρωτογενής πηγή:**")
+            for s in used_sources:
                 title = s.get("title", "") or s.get("url", "")
                 url = s.get("url", "")
-                st.markdown(f"- [{idx}] [{title}]({url})")
+                st.markdown(f"- [{title}]({url})")
 
         st.markdown("---")
         st.markdown(a.get("content_markdown", ""))
@@ -265,7 +527,7 @@ def _render_teasers(bundle: Dict[str, Any]) -> None:
     teasers = bundle["teasers"]
     lang_code = bundle["language"]
     with st.container(border=True):
-        st.markdown("### 📱 Social Media Teasers")
+        st.markdown("### 📱 Teasers Κοινωνικών Δικτύων")
         for key, label, limit in (
             ("twitter", "🐦 Twitter/X", 280),
             ("linkedin", "💼 LinkedIn", 300),
@@ -279,7 +541,7 @@ def _render_teasers(bundle: Dict[str, Any]) -> None:
             )
             st.markdown(f"<div class='teaser-text'>{text}</div>", unsafe_allow_html=True)
             st.markdown(
-                f"<div class='char-count'>{len(text)} / {limit} characters</div>",
+                f"<div class='char-count'>{len(text)} / {limit} χαρακτήρες</div>",
                 unsafe_allow_html=True,
             )
             col1, col2 = st.columns([3, 1])
@@ -292,28 +554,17 @@ def _render_teasers(bundle: Dict[str, Any]) -> None:
 def _render_cleaner_debug(cleaner_output: Dict[str, Any]) -> None:
     with st.expander("🔧 Cleaner output (debug)", expanded=False):
         if cleaner_output.get("_fallback"):
-            st.warning("⚠️ Cleaner failed — showing raw content fallback.")
-        st.markdown(f"**Topic summary:** {cleaner_output.get('topic_summary') or '—'}")
-        st.markdown("**Key facts:**")
+            st.warning("⚠️ Cleaner απέτυχε — fallback στο raw content.")
+        st.markdown(f"**Σύνοψη θέματος:** {cleaner_output.get('topic_summary') or '—'}")
+        st.markdown("**Βασικά facts:**")
         facts = cleaner_output.get("key_facts") or []
         if facts:
             for f in facts:
                 st.markdown(f"- {f}")
         else:
-            st.markdown("_(none)_")
-        st.markdown("**Cleaned content (first 800 chars):**")
+            st.markdown("_(κανένα)_")
+        st.markdown("**Cleaned content (πρώτοι 800 χαρακτήρες):**")
         st.code((cleaner_output.get("cleaned_content") or "")[:800])
-
-
-def _render_sources_debug(sources: List[Dict[str, str]]) -> None:
-    if not sources:
-        return
-    with st.expander(f"🔗 Sources fetched ({len(sources)})", expanded=False):
-        for idx, s in enumerate(sources, start=1):
-            st.markdown(f"**[{idx}]** {s.get('title', '(no title)')}")
-            st.markdown(f"    {s.get('url', '')}")
-            if s.get("domain"):
-                st.caption(f"    domain: `{s['domain']}`")
 
 
 def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
@@ -322,204 +573,441 @@ def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
 
 
 # ============================================
-# MAIN RENDER
+# ΚΥΡΙΩΣ RENDER
 # ============================================
 
 def render_admin_tab() -> None:
-    """Render the three admin tabs (Generate / Drafts / Analytics)."""
+    """Render των τεσσάρων καρτελών του admin."""
 
-    # Session-state defaults (FIX 7)
     for key, value in DEFAULT_STATE.items():
         if key not in st.session_state:
-            st.session_state[key] = value
+            # Χρήση copy για dict/list ώστε να μην μοιραζόμαστε reference
+            if isinstance(value, (dict, list)):
+                st.session_state[key] = value.copy()
+            else:
+                st.session_state[key] = value
 
-    admin_tabs = st.tabs(["📝 Generate Article", "📚 Drafts History", "📊 Analytics"])
+    admin_tabs = st.tabs(
+        [
+            "📥 Inbox & Research",
+            "📝 Generate Article",
+            "📚 Drafts History",
+            "📊 Analytics",
+        ]
+    )
 
-    # ---------- TAB 1: GENERATE ----------
+    # ============================================================
+    # ΚΑΡΤΕΛΑ 1: INBOX & RESEARCH
+    # ============================================================
     with admin_tabs[0]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
-        st.markdown("<h2>📝 Generate New Article</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>📥 Inbox & Research</h2>", unsafe_allow_html=True)
+
+        # ---------------- Section A: Fresh News (RSS) ----------------
+        st.markdown("### 📰 Fresh News (τελευταίες 48 ώρες)")
+
+        watchlist = load_watchlist()
+        watchlist.sort(
+            key=lambda i: i.get("published_at") or "",
+            reverse=True,
+        )
+
+        if not watchlist:
+            st.info(
+                "📭 Δεν υπάρχουν φρέσκα νέα. Τρέξε `python scripts/poll_feeds.py` "
+                "ή χρησιμοποίησε το Deep Research πιο κάτω."
+            )
+        else:
+            for item in watchlist:
+                _render_news_card(
+                    item,
+                    target_point=item.get("title") or "",
+                    button_key_prefix="rss",
+                )
+
+        st.markdown("---")
+
+        # ---------------- Section B: Deep Research ----------------
+        st.markdown("### 🔍 Deep Research (Επίσημες Ιστοσελίδες)")
+        st.caption(
+            "Ψάχνει **βαθιά** στο επίσημο site της εταιρίας (exact + loose match) "
+            "και σου δείχνει candidates. Διαλέγεις ΕΝΑ — αυτό θα είναι η πηγή."
+        )
+
+        companies = list_companies()
+        company_map = {c.key: c.display_name for c in companies}
+
+        col1, col2 = st.columns([2, 3])
+        with col1:
+            research_company_key = st.selectbox(
+                "Εταιρία",
+                options=list(company_map.keys()),
+                format_func=lambda k: company_map[k],
+                key="research_company_select",
+            )
+        with col2:
+            research_query = st.text_input(
+                "Λέξη-κλειδί αναζήτησης",
+                placeholder="π.χ. V3 release, GPT-6, Muse Wonder",
+                key="research_query_input",
+            )
+
+        search_clicked = st.button("🔎 Search Official Site")
+
+        if search_clicked:
+            if not research_query or not research_query.strip():
+                st.error("❌ Γράψε μια λέξη-κλειδί για αναζήτηση.")
+            else:
+                try:
+                    company = get_company(research_company_key)
+                except Exception as e:
+                    st.error(f"❌ Άγνωστη εταιρία: {e}")
+                    company = None
+
+                if company is not None:
+                    primary = company.primary_domain
+                    if not primary:
+                        st.error(
+                            f"❌ Η {company.display_name} δεν έχει domain "
+                            f"ρυθμισμένο στο sources.yaml."
+                        )
+                    else:
+                        provider_name = st.session_state.get(
+                            "content_provider", "jina"
+                        )
+                        try:
+                            from utils.providers import get_provider
+
+                            provider = get_provider(name=provider_name)
+                        except Exception as e:
+                            st.error(f"❌ Σφάλμα provider: {e}")
+                            provider = None
+
+                        if provider is not None:
+                            with st.spinner(
+                                f"🔍 Βαθιά αναζήτηση στο {primary} για "
+                                f"«{research_query}» (exact + loose)..."
+                            ):
+                                candidates = _deep_research(
+                                    provider=provider,
+                                    query=research_query,
+                                    site=primary,
+                                )
+
+                            if not candidates:
+                                st.warning(
+                                    f"⚠️ Δεν βρέθηκαν αποτελέσματα για "
+                                    f"«{research_query}» στο {primary}."
+                                )
+                                st.session_state["research_results"] = None
+                            else:
+                                st.session_state["research_results"] = candidates
+                                st.session_state["research_query"] = research_query
+                                st.session_state["research_company_key"] = (
+                                    research_company_key
+                                )
+
+        # Εμφάνιση αποτελεσμάτων
+        research_results = st.session_state.get("research_results")
+        research_company_key_stored = st.session_state.get("research_company_key")
+        research_query_stored = st.session_state.get("research_query")
+
+        if research_results:
+            st.markdown(
+                f"**Βρέθηκαν {len(research_results)} candidates για "
+                f"«{research_query_stored}»** — διάλεξε ΕΝΑ για να γίνει "
+                f"η πηγή του άρθρου:"
+            )
+            for src in research_results:
+                _render_news_card(
+                    {
+                        "title": src.get("title") or src.get("url"),
+                        "url": src.get("url"),
+                        "summary": "",
+                        "company_key": research_company_key_stored,
+                        "company_name": company_map.get(
+                            research_company_key_stored or "", ""
+                        ),
+                    },
+                    target_point=research_query_stored or "",
+                    company_key=research_company_key_stored,
+                    button_key_prefix="research",
+                )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ============================================================
+    # ΚΑΡΤΕΛΑ 2: GENERATE ARTICLE
+    # ============================================================
+    with admin_tabs[1]:
+        st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
+        st.markdown("<h2>📝 Δημιουργία Νέου Άρθρου</h2>", unsafe_allow_html=True)
+
+        pending_url = st.session_state.get("pending_feed_item_url")
+        pending_company = st.session_state.get("pending_company_key")
+        pending_topic = st.session_state.get("pending_target_point")
+        pending_title = st.session_state.get("pending_source_title")
+
+        if pending_url:
+            st.info(
+                f"📥 Προ-συμπληρωμένο από Inbox/Research:\n"
+                f"- **Πηγή:** {pending_title or pending_url}\n"
+                f"- **URL:** {pending_url}\n"
+                f"- **Εταιρία:** {pending_company or '—'}"
+            )
+
+        companies = list_companies()
+        company_map = {c.key: c.display_name for c in companies}
+
+        company_keys = list(company_map.keys())
+        default_company_idx = 0
+        if pending_company and pending_company in company_keys:
+            default_company_idx = company_keys.index(pending_company)
+
+        company_key = st.selectbox(
+            "Εταιρία *",
+            options=company_keys,
+            index=default_company_idx,
+            format_func=lambda k: company_map[k],
+            help="Πρωτογενής πηγή — μόνο domains από config/sources.yaml",
+        )
+
+        try:
+            company = get_company(company_key)
+        except Exception as e:
+            st.error(f"❌ Δεν φορτώθηκε η εταιρία {company_key}: {e}")
+            st.stop()
 
         col1, col2 = st.columns(2)
         with col1:
-            target_point = st.text_input(
-                "Target Point (Keywords) *",
-                placeholder="e.g., automation excel outreach",
-                help="Keywords to search for content",
+            category = st.selectbox(
+                "Κατηγορία *",
+                options=CATEGORY_NAMES,
+                help="Καθορίζει section + γωνία γραφής",
             )
         with col2:
-            category = st.selectbox(
-                "Category *",
-                options=CATEGORY_NAMES,
-                help="Determines section + writing angle (traffic vs conversion)",
+            language_label = st.selectbox(
+                "Γλώσσα *",
+                options=list(LANGUAGE_CHOICES.keys()),
+                index=0,
             )
+            language_value = LANGUAGE_CHOICES[language_label]
 
-        language_label = st.selectbox(
-            "Language *",
-            options=list(LANGUAGE_CHOICES.keys()),
-            index=0,
-            help=(
-                "🌐 Both generates 2 articles (Greek + English) sharing a "
-                "translation_id, for hreflang pairing on the FastAPI site."
-            ),
-        )
-        language_value = LANGUAGE_CHOICES[language_label]
+        default_mode_idx = 1
+        if pending_url:
+            default_mode_idx = 2
 
-        source_mode = st.radio(
-            "Source Mode *",
-            options=SOURCE_MODES,
-            index=0,
+        ingestion_mode = st.radio(
+            "Ingestion Mode *",
+            options=INGESTION_MODES,
+            index=default_mode_idx,
             horizontal=True,
-            help=(
-                "Auto: provider search. Manual: your URLs only. "
-                "Hybrid: provider search + your URLs."
-            ),
         )
 
-        # ==================================================
-        # FIX 7: Content provider toggle (only new UI here)
-        # ==================================================
         provider_choice = st.radio(
             "Content Provider",
             options=["jina", "tavily"],
             index=0,
             horizontal=True,
-            help="Jina: existing. Tavily: search+extract in one call.",
         )
         st.session_state["content_provider"] = provider_choice
-        # ==================================================
 
-        urls_input = ""
-        if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID):
-            urls_input = st.text_area(
-                f"URLs (one per line, 1-{MAX_MANUAL_URLS} max)",
-                placeholder="https://example.com/article\nhttps://...",
-                height=150,
+        feed_item_url: Optional[str] = None
+        target_point = ""
+
+        if ingestion_mode == INGESTION_MODE_RSS:
+            if not company.has_rss:
+                st.warning(
+                    f"⚠️ Η {company.display_name} δεν έχει RSS feed."
+                )
+            else:
+                items = load_watchlist_for_company(company_key)
+                if not items:
+                    st.info(
+                        f"📭 Δεν υπάρχουν items για {company.display_name}."
+                    )
+                else:
+                    idx = st.selectbox(
+                        f"Feed item ({len(items)} διαθέσιμα) *",
+                        options=range(len(items)),
+                        format_func=lambda i: (
+                            f"{items[i].get('title', '(χωρίς τίτλο)')} "
+                            f"({items[i].get('published_at') or '—'})"
+                        ),
+                    )
+                    feed_item_url = items[idx].get("url")
+                    st.caption(f"🔗 {feed_item_url}")
+
+            target_point = st.text_input(
+                "Θέμα άρθρου (λέξεις-κλειδιά) *",
+                value=pending_topic or "",
             )
+
+        elif ingestion_mode == INGESTION_MODE_MANUAL:
+            feed_item_url = st.text_input(
+                "URL *",
+                value=pending_url or "",
+                placeholder=f"https://{company.primary_domain or 'example.com'}/...",
+            )
+            target_point = st.text_input(
+                "Θέμα άρθρου (λέξεις-κλειδιά) *",
+                value=pending_topic or "",
+            )
+
+        elif ingestion_mode == INGESTION_MODE_RESTRICTED:
+            target_point = st.text_input(
+                "Θέμα αναζήτησης *",
+                value=pending_topic or "",
+                placeholder="π.χ. V3 release",
+            )
+            primary = company.primary_domain or "?"
+            st.caption(f"🔍 Θα ψάξει μόνο στο `{primary}` και θα κρατήσει 1 πηγή.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             generate_btn = st.button("🚀 Generate Article", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
         if generate_btn:
-            if not target_point or not category:
-                st.error("❌ Please fill in all required fields")
+            missing: List[str] = []
+            if not category:
+                missing.append("Κατηγορία")
+            if not target_point.strip():
+                missing.append("Θέμα")
+            if (
+                ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL)
+                and not feed_item_url
+            ):
+                missing.append("URL / Feed item")
+
+            if missing:
+                st.error(f"❌ Λείπουν: {', '.join(missing)}")
             else:
-                urls = _parse_urls(urls_input) if urls_input else []
-
-                if source_mode == SOURCE_MODE_MANUAL and not urls:
-                    st.error("❌ Manual mode requires at least 1 URL.")
-                    return
-
-                if len(urls) > MAX_MANUAL_URLS:
-                    st.warning(
-                        f"⚠️ {len(urls)} URLs provided — using the first "
-                        f"{MAX_MANUAL_URLS}."
-                    )
-                    urls = urls[:MAX_MANUAL_URLS]
-
                 try:
                     from utils.article_generator import ArticleGenerator
 
                     generator = ArticleGenerator()
                 except Exception as e:
-                    st.error(f"❌ Error initializing ArticleGenerator: {e}")
+                    st.error(f"❌ Σφάλμα αρχικοποίησης ArticleGenerator: {e}")
                     generator = None
 
                 if generator is not None:
                     output = generator.full_pipeline(
                         target_point=target_point,
                         category=category,
-                        source_mode=source_mode,
+                        company_key=company_key,
+                        ingestion_mode=ingestion_mode,
+                        feed_item_url=feed_item_url,
                         language_selection=language_value,
-                        urls=urls if urls else None,
                     )
 
                     st.session_state["last_gen"] = {
                         "cleaner": output.get("cleaner", {}),
                         "bundles": output.get("bundles", []),
                         "sources": output.get("sources", []),
+                        "company": output.get("company", {}),
                         "category": category,
                         "category_slug": output.get("category_slug", ""),
                         "target_point": target_point,
-                        "source_mode": source_mode,
+                        "ingestion_mode": ingestion_mode,
                         "provider": st.session_state.get("content_provider", "jina"),
                         "saved": False,
                         "published": False,
                     }
 
-        # ---------- DISPLAY LAST GENERATION ----------
+                    st.session_state["pending_feed_item_url"] = None
+                    st.session_state["pending_company_key"] = None
+                    st.session_state["pending_target_point"] = None
+                    st.session_state["pending_source_title"] = None
+
         gen = st.session_state.get("last_gen")
         if gen and gen.get("bundles"):
             bundles = gen["bundles"]
-            category = gen["category"]
+            category_v = gen["category"]
             category_slug = gen["category_slug"]
-            target_point = gen["target_point"]
-            sources = gen.get("sources", [])
-
+            target_point_v = gen["target_point"]
+            company_key_v = (gen.get("company") or {}).get("key") or company_key
             provider_label = gen.get("provider", "jina")
+
             st.success(
-                f"✅ Generated {len(bundles)} article bundle(s) via **{provider_label}**!"
+                f"✅ Δημιουργήθηκαν {len(bundles)} bundle(s) μέσω "
+                f"**{provider_label}** (1 πρωτογενής πηγή)"
             )
-            _render_sources_debug(sources)
             _render_cleaner_debug(gen["cleaner"])
 
             if len(bundles) == 1:
-                _render_bundle(bundles[0], category)
+                _render_bundle(bundles[0], category_v)
             else:
                 flag = {"el": "🇬🇷", "en": "🇬🇧"}
                 tabs = st.tabs(
-                    [f"{flag.get(b['language'], '🌐')} {b['language_name']}" for b in bundles]
+                    [
+                        f"{flag.get(b['language'], '🌐')} {b['language_name']}"
+                        for b in bundles
+                    ]
                 )
                 for tab, bundle in zip(tabs, bundles):
                     with tab:
-                        _render_bundle(bundle, category)
+                        _render_bundle(bundle, category_v)
 
             st.markdown("---")
             col1, col2 = st.columns(2)
             with col1:
                 if st.button(
-                    "💾 Save as Draft",
+                    "💾 Αποθήκευση ως Draft",
                     use_container_width=True,
                     disabled=gen.get("saved") or gen.get("published"),
                 ):
                     if save_bundles_as_drafts(
-                        bundles, target_point, category, category_slug
+                        bundles,
+                        target_point_v,
+                        category_v,
+                        category_slug,
+                        company_key_v,
                     ):
                         gen["saved"] = True
-                        st.success(f"✅ Saved {len(bundles)} draft(s).")
+                        st.success(f"✅ Αποθηκεύτηκαν {len(bundles)} draft(s).")
                     else:
-                        st.error("❌ Failed to save draft(s)")
+                        st.error("❌ Αποτυχία αποθήκευσης draft(s)")
             with col2:
                 if st.button(
-                    "🚀 Publish Immediately",
+                    "🚀 Άμεση Δημοσίευση",
                     use_container_width=True,
                     disabled=gen.get("published"),
                 ):
-                    if publish_bundles(bundles, target_point, category, category_slug):
+                    if publish_bundles(
+                        bundles,
+                        target_point_v,
+                        category_v,
+                        category_slug,
+                        company_key_v,
+                    ):
                         gen["published"] = True
-                        st.success(f"✅ Published {len(bundles)} article(s)!")
+                        st.success(f"✅ Δημοσιεύτηκαν {len(bundles)} άρθρα!")
                         st.balloons()
                     else:
-                        st.error("❌ Failed to publish")
+                        st.error("❌ Αποτυχία δημοσίευσης")
 
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
-                if st.button("🗑️ Clear Result", use_container_width=True):
+                if st.button("🗑️ Καθαρισμός Αποτελέσματος", use_container_width=True):
                     st.session_state["last_gen"] = None
                     st.rerun()
 
-    # ---------- TAB 2: DRAFTS ----------
-    with admin_tabs[1]:
+    # ============================================================
+    # ΚΑΡΤΕΛΑ 3: DRAFTS HISTORY
+    # ============================================================
+    with admin_tabs[2]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
-        st.markdown("<h2>📚 Drafts History</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>📚 Ιστορικό Drafts</h2>", unsafe_allow_html=True)
 
         drafts = load_drafts()
         if not drafts:
-            st.info("📭 No drafts yet. Generate your first article first!")
+            st.info("📭 Δεν υπάρχουν drafts ακόμα.")
         else:
-            st.markdown(f"**Total Drafts:** {len(drafts)} (Max {MAX_DRAFTS_IN_HISTORY})")
+            st.markdown(
+                f"**Σύνολο Drafts:** {len(drafts)} (Μέγιστο {MAX_DRAFTS_IN_HISTORY})"
+            )
             st.markdown("---")
             for draft in reversed(drafts):
                 with st.container(border=True):
@@ -534,16 +1022,14 @@ def render_admin_tab() -> None:
                         )
                         st.markdown(
                             f"📅 {draft['date']} | 📂 {draft['category']} "
-                            f"| 📝 {draft['word_count']} words "
+                            f"| 🏢 {draft.get('company_key', '—')} "
+                            f"| 📝 {draft['word_count']} λέξεις "
                             f"| {lang_badge} {draft.get('language','—')}",
                             unsafe_allow_html=True,
                         )
-                        st.markdown(f"🎯 Target: {draft['target_point']}")
+                        st.markdown(f"🎯 Θέμα: {draft['target_point']}")
                         if draft.get("translation_id"):
                             st.caption(f"🔗 translation_id: `{draft['translation_id']}`")
-                        n_sources = len(draft.get("sources") or [])
-                        if n_sources:
-                            st.caption(f"🔗 {n_sources} source(s)")
                     with col2:
                         st.markdown(
                             "<span class='status-badge status-draft'>DRAFT</span>",
@@ -551,51 +1037,53 @@ def render_admin_tab() -> None:
                         )
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        if st.button("👁️ Preview", key=f"pv_{draft['id']}"):
+                        if st.button("👁️ Προεπισκόπηση", key=f"pv_{draft['id']}"):
                             st.markdown(draft["content"][:300] + "...")
                     with c2:
-                        if st.button("🚀 Publish", key=f"pub_{draft['id']}"):
+                        if st.button("🚀 Δημοσίευση", key=f"pub_{draft['id']}"):
                             if publish_draft(draft):
-                                st.success("✅ Published!")
+                                st.success("✅ Δημοσιεύτηκε!")
                                 st.rerun()
                     with c3:
-                        if st.button("🗑️ Delete", key=f"del_{draft['id']}"):
+                        if st.button("🗑️ Διαγραφή", key=f"del_{draft['id']}"):
                             if delete_draft(draft["id"]):
-                                st.success("✅ Deleted!")
+                                st.success("✅ Διαγράφηκε!")
                                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------- TAB 3: ANALYTICS ----------
-    with admin_tabs[2]:
+    # ============================================================
+    # ΚΑΡΤΕΛΑ 4: ANALYTICS
+    # ============================================================
+    with admin_tabs[3]:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
-        st.markdown("<h2>📊 Analytics</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>📊 Στατιστικά</h2>", unsafe_allow_html=True)
         drafts = load_drafts()
         blog = load_blog()
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("📚 Published", len(blog))
+        c1.metric("📚 Δημοσιευμένα", len(blog))
         c2.metric("📝 Drafts", len(drafts))
-        c3.metric("📊 Total", len(blog) + len(drafts))
+        c3.metric("📊 Σύνολο", len(blog) + len(drafts))
 
         if blog:
             st.markdown("---")
-            st.markdown("**🌐 By language:**")
+            st.markdown("**🌐 Ανά γλώσσα:**")
             lang_counts: Dict[str, int] = {}
             for a in blog:
                 code = a.get("language", "—")
                 lang_counts[code] = lang_counts.get(code, 0) + 1
             for code, count in sorted(lang_counts.items(), key=lambda x: -x[1]):
                 badge = {"el": "🇬🇷", "en": "🇬🇧"}.get(code, "🌐")
-                st.markdown(f"- {badge} `{code}`: **{count}** articles")
+                st.markdown(f"- {badge} `{code}`: **{count}** άρθρα")
 
             st.markdown("---")
-            st.markdown("**📂 By category:**")
+            st.markdown("**📂 Ανά κατηγορία:**")
             cat_counts: Dict[str, int] = {}
             for a in blog:
                 cat = a.get("category", "—")
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
             for cat, count in sorted(cat_counts.items(), key=lambda x: -x[1]):
-                st.markdown(f"- {cat}: **{count}** articles")
+                st.markdown(f"- {cat}: **{count}** άρθρα")
         st.markdown("</div>", unsafe_allow_html=True)
 
 

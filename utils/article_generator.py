@@ -1,29 +1,20 @@
 """
-Article generation pipeline for the does4u admin panel.
+Article generation pipeline for the does4u admin panel (v4.0, D-020).
 
-Pipeline (self-contained — handles fetch internally):
-    Fetch (via provider abstraction)
-        -> Cleaner (language-agnostic)
+PRIMARY-SOURCE-ONLY pipeline:
+    Fetch (exactly 1 primary source)
+        -> Cleaner
         -> Writer (per language, per category, with citations)
         -> Teasers (per language, per category, with fallback)
-        -> ## Sources section appended programmatically (REPLACES any LLM section)
+        -> ## Sources section appended programmatically
 
-Provider abstraction: see utils.providers.
-    - JinaProvider: SERP search + per-URL reader.
-    - TavilyProvider: search + extract in one call.
+Ingestion modes (what the user picks in the UI):
+    - "RSS (today's items)"  : read a specific item from watchlist_queue.json.
+    - "Restricted Search"    : SERP restricted to the company's domain.
+    - "Manual URL"           : user pastes a specific URL.
 
-Source modes:
-    - "Auto (Jina)"           : provider search + extract (domain diversity ON).
-    - "Manual (URLs)"         : user URLs only (domain diversity OFF).
-    - "Hybrid (Jina + URLs)"  : user URLs first (no domain dedup), then
-                                provider search (domain dedup), merged.
-
-Model notes:
-    - All stages use gpt-5.6-luna during the test phase.
-    - GPT-5.x require ``max_completion_tokens`` and reject custom
-      ``temperature``; both are handled in ``_call_llm``.
-    - Teasers may fall back to gpt-4o-mini if Luna returns empty, and further
-      to a sentence-extraction fallback if both fail.
+Companies come from config/sources.yaml (whitelist of 10 AI companies).
+Provider abstraction is in utils.providers (Jina / Tavily).
 """
 import json
 import logging
@@ -53,12 +44,16 @@ LANGUAGE_OPTIONS: Dict[str, Dict[str, str]] = {
 }
 
 # ============================================
-# SOURCE MODES
+# INGESTION MODES (v4.0)
 # ============================================
-SOURCE_MODE_AUTO = "Auto (Jina)"
-SOURCE_MODE_MANUAL = "Manual (URLs)"
-SOURCE_MODE_HYBRID = "Hybrid (Jina + URLs)"
-SOURCE_MODES = [SOURCE_MODE_AUTO, SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID]
+INGESTION_MODE_RSS = "RSS (today's items)"
+INGESTION_MODE_RESTRICTED = "Restricted Search"
+INGESTION_MODE_MANUAL = "Manual URL"
+INGESTION_MODES = [
+    INGESTION_MODE_RSS,
+    INGESTION_MODE_RESTRICTED,
+    INGESTION_MODE_MANUAL,
+]
 
 # ============================================
 # MODEL CONFIG
@@ -86,11 +81,7 @@ FALLBACK_RAW_CONTENT_CHARS = 4000
 # MODULE-LEVEL HELPERS
 # ============================================
 def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
-    """Build teasers from the first sentences when the LLM fails.
-
-    Returns the same shape as a successful LLM teaser response so the UI
-    doesn't need to branch.
-    """
+    """Build teasers from the first sentences when the LLM fails."""
     sentences = [s.strip() for s in article_text.split(".") if s.strip()]
     first = ". ".join(sentences[:2]) + "." if sentences else ""
     if not first:
@@ -106,20 +97,7 @@ def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
 def append_sources_section(
     article_markdown: str, sources: List[Dict[str, str]]
 ) -> str:
-    """Append a '## Sources' section, REPLACING any existing one.
-
-    The LLM often adds its own partial Sources section (sometimes only 1 source
-    even when 5 were provided). We override it programmatically so the final
-    article always lists every fetched source.
-
-    Args:
-        article_markdown: The article body (may already contain '## Sources').
-        sources: The authoritative list of fetched sources.
-
-    Returns:
-        The article with a single, correct '## Sources' section at the end.
-    """
-    # Step 1: Remove any existing Sources section (usually from the LLM).
+    """Append a '## Sources' section, REPLACING any existing one."""
     if "## Sources" in article_markdown:
         idx = article_markdown.find("## Sources")
         article_markdown = article_markdown[:idx].rstrip()
@@ -127,7 +105,6 @@ def append_sources_section(
     if not sources:
         return article_markdown
 
-    # Step 2: Build the authoritative Sources section.
     lines: List[str] = ["## Sources"]
     for s in sources:
         title = s.get("title") or s.get("url", "Source")
@@ -137,7 +114,6 @@ def append_sources_section(
         lines.append(f"- [{title}]({url})")
 
     if len(lines) == 1:
-        # No valid sources after filtering
         return article_markdown
 
     return article_markdown.rstrip() + "\n\n" + "\n".join(lines) + "\n"
@@ -147,7 +123,7 @@ def append_sources_section(
 # MAIN CLASS
 # ============================================
 class ArticleGenerator:
-    """Blog article generation pipeline with category + language + sources."""
+    """Blog article generation pipeline (v4.0 — primary-source-only)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -179,15 +155,11 @@ class ArticleGenerator:
             )
         return BLOG_CATEGORIES[category]
 
-    # ------------------------------------------------------------------
-    # Provider resolution
-    # ------------------------------------------------------------------
     @staticmethod
     def _resolve_provider_name() -> Optional[str]:
-        """Read the provider name from Streamlit session state, if available."""
         try:
             return st.session_state.get("content_provider")
-        except Exception:  # noqa: BLE001 — script mode / no context
+        except Exception:  # noqa: BLE001
             return None
 
     # ------------------------------------------------------------------
@@ -201,7 +173,6 @@ class ArticleGenerator:
         max_tokens: int,
         stage: str,
     ) -> Optional[str]:
-        """Call OpenAI. Empty response triggers a single retry with 2x budget."""
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -224,7 +195,6 @@ class ArticleGenerator:
                     messages=[{"role": "user", "content": prompt}],
                 )
                 content = response.choices[0].message.content
-
                 if not content or not content.strip():
                     logger.error(
                         "[%s] Empty response from %s after retry", stage, model
@@ -373,7 +343,7 @@ class ArticleGenerator:
         return result
 
     # ------------------------------------------------------------------
-    # Stage 3 — Teasers (with fallback chain)
+    # Stage 3 — Teasers
     # ------------------------------------------------------------------
     def generate_social_teasers(
         self,
@@ -383,7 +353,6 @@ class ArticleGenerator:
         language: str = "Greek",
         article_text: str = "",
     ) -> Dict[str, Dict[str, Any]]:
-        """Generate teasers. Never returns None — falls back to text extraction."""
         try:
             cfg = self.get_category_config(category)
         except ValueError as exc:
@@ -397,7 +366,6 @@ class ArticleGenerator:
             language=language,
         )
 
-        # Attempt 1: primary model
         result = self._call_llm_json(
             model=TEASER_MODEL,
             prompt=prompt,
@@ -407,7 +375,6 @@ class ArticleGenerator:
         if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
             return result
 
-        # Attempt 2: fallback model
         logger.warning(
             "[Teasers/%s/%s] Primary model failed, trying %s",
             category,
@@ -423,7 +390,6 @@ class ArticleGenerator:
         if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
             return result
 
-        # Attempt 3: text fallback
         logger.warning(
             "[Teasers/%s/%s] Both models failed — using text fallback",
             category,
@@ -432,19 +398,40 @@ class ArticleGenerator:
         return generate_fallback_teasers(article_text)
 
     # ------------------------------------------------------------------
-    # Full pipeline
+    # Full pipeline (v4.0 — primary-source-only)
     # ------------------------------------------------------------------
     def full_pipeline(
         self,
         target_point: str,
         category: str,
-        source_mode: str = SOURCE_MODE_AUTO,
+        company_key: str,
+        ingestion_mode: str = INGESTION_MODE_RESTRICTED,
+        feed_item_url: Optional[str] = None,
         language_selection: str = "Greek",
-        urls: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
+        """Run the full pipeline: fetch 1 primary source -> clean -> write -> teasers.
+
+        Args:
+            target_point: SEO topic / search query.
+            category: One of BLOG_CATEGORIES keys.
+            company_key: Whitelisted company (see config/sources.yaml).
+            ingestion_mode: INGESTION_MODE_RSS / _RESTRICTED / _MANUAL.
+            feed_item_url: Required for RSS and Manual modes.
+            language_selection: "Greek" | "English" | "Both".
+
+        Returns:
+            {
+              "cleaner": {...},
+              "sources": [single source],
+              "company": {...},
+              "category_slug": "ai-updates" | "growth-hack",
+              "bundles": [...],
+            }
+        """
         empty_result: Dict[str, Any] = {
             "cleaner": {},
             "sources": [],
+            "company": {},
             "category_slug": "",
             "bundles": [],
         }
@@ -456,11 +443,26 @@ class ArticleGenerator:
             return empty_result
         empty_result["category_slug"] = cfg["slug"]
 
-        # ---- Fetch ----
+        # Resolve company
+        try:
+            from utils.sources import get_company
+
+            company = get_company(company_key)
+            empty_result["company"] = {
+                "key": company.key,
+                "display_name": company.display_name,
+                "domains": company.domains,
+            }
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"❌ Unknown company: {exc}")
+            return empty_result
+
+        # ---- Fetch (1 source) ----
         raw_content, sources = self._fetch_content(
-            source_mode=source_mode,
+            ingestion_mode=ingestion_mode,
             target_point=target_point,
-            urls=urls,
+            company_key=company_key,
+            feed_item_url=feed_item_url,
         )
         if not raw_content:
             st.error("❌ No content could be fetched. Pipeline aborted.")
@@ -509,8 +511,6 @@ class ArticleGenerator:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)
                 continue
 
-            # Enforce ## Sources section programmatically.
-            # This REPLACES any partial section the LLM may have written.
             article["content_markdown"] = append_sources_section(
                 article.get("content_markdown", ""),
                 sources,
@@ -532,42 +532,42 @@ class ArticleGenerator:
                     "translation_id": translation_id,
                     "article": article,
                     "teasers": teasers,
-                    # Always expose the AUTHORITATIVE fetched sources, not the
-                    # (possibly incomplete) list the LLM produced.
                     "sources": sources,
+                    "company_key": company_key,
                 }
             )
 
         return {
             "cleaner": cleaner_output,
             "sources": sources,
+            "company": empty_result["company"],
             "category_slug": cfg["slug"],
             "bundles": bundles,
         }
 
     # ------------------------------------------------------------------
-    # Fetch (provider-aware, mode-aware)
+    # Fetch (v4.0 — exactly 1 primary source)
     # ------------------------------------------------------------------
     def _fetch_content(
         self,
         *,
-        source_mode: str,
+        ingestion_mode: str,
         target_point: str,
-        urls: Optional[List[str]],
+        company_key: str,
+        feed_item_url: Optional[str] = None,
     ) -> tuple[str, List[Dict[str, str]]]:
-        """Fetch content via the selected provider, respecting source_mode.
+        """Fetch exactly 1 source based on ingestion_mode.
 
-        - Manual: only user URLs; domain diversity OFF.
-        - Auto:   provider search; domain diversity ON.
-        - Hybrid: manual (no domain dedup) + auto (domain dedup) merged;
-                  final URL-only dedup to remove cross-mode duplicates.
+        - RSS: use feed_item_url directly (already vetted from a feed).
+        - Manual URL: use feed_item_url directly (user-provided).
+        - Restricted Search: SERP restricted to company.primary_domain.
 
         Returns:
-            (raw_content, sources). Both empty on total failure.
+            (raw_content, sources) with at most 1 source. Both empty on failure.
         """
         from utils.providers import get_provider
+        from utils.sources import get_company
 
-        # Resolve provider (may raise if Tavily selected but not configured)
         try:
             provider_name = self._resolve_provider_name()
             provider = get_provider(name=provider_name)
@@ -575,96 +575,74 @@ class ArticleGenerator:
             st.error(f"❌ Could not initialize content provider: {exc}")
             return "", []
 
-        manual_urls = urls or []
-        raw_parts: List[str] = []
-        sources: List[Dict[str, str]] = []
+        try:
+            company = get_company(company_key)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"❌ Unknown company: {exc}")
+            return "", []
 
-        # ---- Manual URLs (Manual or Hybrid) ----
-        if source_mode in (SOURCE_MODE_MANUAL, SOURCE_MODE_HYBRID) and manual_urls:
-            with st.spinner(f"🔍 Extracting content from {len(manual_urls)} URL(s)..."):
-                manual_extractions: List[Dict[str, Any]] = []
-                for url in manual_urls:
-                    result = provider.extract_from_url(url)
-                    if result:
-                        manual_extractions.append(result)
-                    else:
-                        st.warning(f"⚠️ Could not extract content from: {url}")
-
-            if manual_extractions:
-                merged_manual = provider.merge_extractions(manual_extractions)
-                manual_sources = self._dedupe_sources(
-                    merged_manual["sources"], enforce_domain_diversity=False
+        # ---------- RSS or Manual URL ----------
+        if ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL):
+            if not feed_item_url:
+                st.error(
+                    f"❌ {ingestion_mode} mode requires a URL "
+                    f"(feed_item_url is empty)."
                 )
-                sources.extend(manual_sources)
-                raw_parts.append(merged_manual["content"])
+                return "", []
 
-        # ---- Auto search (Auto or Hybrid) ----
-        if source_mode in (SOURCE_MODE_AUTO, SOURCE_MODE_HYBRID):
-            with st.spinner("🔍 Searching + extracting..."):
-                merged_auto = provider.search_and_extract(
-                    target_point, max_results=6
+            with st.spinner("🔍 Extracting from URL..."):
+                result = provider.extract_from_url(feed_item_url)
+
+            if not result:
+                st.error(f"❌ Could not extract content from: {feed_item_url}")
+                return "", []
+
+            url = result.get("url", feed_item_url)
+            sources = [
+                {
+                    "url": url,
+                    "title": result.get("title", "") or url,
+                    "domain": urlparse(url).netloc.lower(),
+                }
+            ]
+            return result.get("content", ""), sources
+
+        # ---------- Restricted Search ----------
+        if ingestion_mode == INGESTION_MODE_RESTRICTED:
+            primary = company.primary_domain
+            if not primary:
+                st.error(
+                    f"❌ {company.display_name} has no configured domain for "
+                    f"restricted search."
+                )
+                return "", []
+
+            if not target_point or not target_point.strip():
+                st.error("❌ Restricted Search mode requires a topic.")
+                return "", []
+
+            with st.spinner(f"🔍 Searching {primary} (restricted)..."):
+                merged = provider.search_and_extract(
+                    target_point, max_results=6, site=primary
                 )
 
-            if merged_auto:
-                auto_sources = self._dedupe_sources(
-                    merged_auto.get("sources", []),
-                    enforce_domain_diversity=True,
+            if not merged or not merged.get("sources"):
+                st.error(
+                    f"❌ No results for {target_point!r} on {primary}."
                 )
-                # Avoid duplicating manual URLs
-                manual_urls_set = {s.get("url") for s in sources if s.get("url")}
-                auto_sources = [
-                    s for s in auto_sources if s.get("url") not in manual_urls_set
-                ]
-                if auto_sources:
-                    sources.extend(auto_sources)
-                    raw_parts.append(merged_auto.get("content", ""))
+                return "", []
 
-        # Final URL-only dedup across all sources
-        sources = self._dedupe_sources(sources, enforce_domain_diversity=False)
+            # v4.0: keep only the first (highest-ranked) source.
+            sources = merged["sources"][:1]
+            return merged.get("content", ""), sources
 
-        raw_content = "\n\n---\n\n".join(p for p in raw_parts if p)
-        return raw_content, sources
+        # ---------- Unknown mode ----------
+        st.error(f"❌ Unknown ingestion mode: {ingestion_mode!r}")
+        return "", []
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    @staticmethod
-    def _dedupe_sources(
-        sources: List[Dict[str, str]],
-        enforce_domain_diversity: bool = False,
-    ) -> List[Dict[str, str]]:
-        """Remove duplicate sources.
-
-        Args:
-            sources: List of {"url", "title", "domain"} dicts.
-            enforce_domain_diversity: If True, allow at most one source per
-                domain (used in Auto mode for credibility diversity). If False,
-                keep all unique URLs (used in Manual mode to honor user choice).
-        """
-        if not sources:
-            return []
-
-        seen_urls: set = set()
-        seen_domains: set = set()
-        result: List[Dict[str, str]] = []
-
-        for s in sources:
-            url = (s.get("url") or "").strip()
-            if not url or url in seen_urls:
-                continue
-
-            if enforce_domain_diversity:
-                domain = urlparse(url).netloc.lower()
-                if domain and domain in seen_domains:
-                    continue
-                if domain:
-                    seen_domains.add(domain)
-
-            seen_urls.add(url)
-            result.append(s)
-
-        return result
-
     @staticmethod
     def _format_sources_for_prompt(sources: List[Dict[str, str]]) -> str:
         if not sources:
@@ -692,9 +670,11 @@ class ArticleGenerator:
 if __name__ == "__main__":
     generator = ArticleGenerator()
     output = generator.full_pipeline(
-        target_point="automation excel",
-        category="Growth Hack",
-        source_mode=SOURCE_MODE_AUTO,
-        language_selection="Both",
+        target_point="GPT-6 release",
+        category="AI Updates",
+        company_key="openai",
+        ingestion_mode=INGESTION_MODE_RESTRICTED,
+        feed_item_url=None,
+        language_selection="Greek",
     )
     print(json.dumps(output, indent=2, ensure_ascii=False, default=str))

@@ -1,23 +1,17 @@
 """
-Content providers for the does4u admin panel.
+Content providers για το does4u admin panel.
 
-Abstraction over "search + extract" backends so the article generator
-doesn't need to know which service is active.
+Αφαίρεση εξάρτησης από συγκεκριμένο backend: το article_generator δεν ξέρει
+ποιος provider τρέχει.
 
-v3.0 strategies:
-    - Manual selection: get_provider(name=...) or CONTENT_PROVIDER env var.
+v4.0 (D-020): primary-source-only pipeline.
+    - Μόνο 1 source ανά άρθρο (TARGET_VALID_SOURCES = 1).
+    - Providers δέχονται `site` για περιορισμό αναζήτησης σε ένα domain.
 
-Future (out of scope for v3.0):
-    - v3.1: ParallelProvider (race both, first with >=5 sources wins).
-    - v3.2: FallbackProvider (try one, fall back to other on failure).
-
-Interface:
-    - ContentProvider.extract_from_url(url) -> Optional[Dict]
-    - ContentProvider.search_and_extract(target_point, max_results) -> Optional[Dict]
-
-Both methods return dicts whose `sources` field has entries of the form
-    {"url": str, "title": str, "domain": str}
-with the merged plain text in the top-level `content` field.
+v4.1 (TASK-214-UI): Deep Research.
+    - Υποστήριξη πολλαπλών candidates (max_sources) ώστε ο χρήστης να
+      διαλέγει ΠΟΙΟ από αυτά θα γίνει το 1 source του άρθρου.
+    - SERP cap αυξημένο (8 -> 20) για βαθύτερη αναζήτηση στο domain.
 """
 from __future__ import annotations
 
@@ -32,10 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
-# CONSTANTS
+# ΣΤΑΘΕΡΕΣ
 # ============================================
-# Strong CAPTCHA signals only (weak ones like "enable javascript" caused
-# false positives in v2.0).
 STRONG_CAPTCHA_KEYWORDS = [
     "prove your humanity",
     "captcha",
@@ -45,60 +37,70 @@ STRONG_CAPTCHA_KEYWORDS = [
 ]
 
 MIN_CONTENT_CHARS = 500
-TARGET_VALID_SOURCES = 5
+# v4.0: το τελικό άρθρο έχει ΠΑΝΤΑ 1 source.
+TARGET_VALID_SOURCES = 1
 
 # Jina specific
 JINA_SEARCH_BASE = "https://s.jina.ai"
 JINA_READER_BASE = "https://r.jina.ai"
 JINA_TIMEOUT = 30
 JINA_RATE_LIMIT_SECONDS = 1.0
+# v4.1: επιτρέπουμε βαθύτερη SERP (Deep Research).
+JINA_MAX_SERP_RESULTS = 20
 
 
 # ============================================
 # ABSTRACT BASE
 # ============================================
 class ContentProvider(ABC):
-    """Abstract base for content providers."""
+    """Abstract base για content providers."""
 
     name: str = "base"
 
     @abstractmethod
     def extract_from_url(self, url: str) -> Optional[Dict[str, Any]]:
-        """Extract content from a single URL.
+        """Εξαγωγή περιεχομένου από ένα URL.
 
-        Returns:
-            {"url": str, "title": str, "content": str} or None on failure.
+        Επιστρέφει:
+            {"url": str, "title": str, "content": str} ή None σε αποτυχία.
         """
 
     @abstractmethod
     def search_and_extract(
-        self, target_point: str, max_results: int = 6
+        self,
+        target_point: str,
+        max_results: int = 6,
+        site: Optional[str] = None,
+        max_sources: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Search + extract content for a target point.
+        """Αναζήτηση + εξαγωγή περιεχομένου για ένα target point.
 
-        Returns:
+        Args:
+            target_point: Το query.
+            max_results: Μέγιστα SERP hits (έως JINA_MAX_SERP_RESULTS).
+            site: Προαιρετικό domain για περιορισμό (v4.0).
+            max_sources: Override του TARGET_VALID_SOURCES.
+                - None  -> 1 (default για δημιουργία άρθρου).
+                - N > 1 -> N candidates (για Deep Research, ο χρήστης
+                  διαλέγει 1 από αυτά).
+
+        Επιστρέφει:
             {
                 "target_point": str,
                 "sources": List[{"url": str, "title": str, "domain": str}],
-                "content": str,  # merged content
+                "content": str,
             }
-            or None on failure.
+            ή None σε αποτυχία.
         """
 
     # ------------------------------------------------------------------
-    # Shared helpers
+    # Κοινά helpers
     # ------------------------------------------------------------------
     @staticmethod
     def merge_extractions(
         extractions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Merge N extractions into one content blob + sources list.
-
-        Each extraction is expected to have ``url``, ``title``, ``content``.
-
-        Returns:
-            {"content": str, "sources": List[{"url","title","domain"}]}
-        """
+        """Συνένωση N extractions σε ένα content blob + λίστα sources."""
         parts: List[str] = []
         sources: List[Dict[str, str]] = []
 
@@ -121,25 +123,11 @@ class ContentProvider(ABC):
         content: str,
         provider_name: str = "provider",
     ) -> bool:
-        """Detect CAPTCHA / human-verification pages.
-
-        Uses only strong signals (see STRONG_CAPTCHA_KEYWORDS) to avoid
-        false positives on pages that merely mention "enable javascript".
-
-        Args:
-            data: The provider's response dict (may carry a "warning" field).
-            content: The extracted text content.
-            provider_name: Label used in log messages ("jina", "tavily", ...).
-
-        Returns:
-            True if the page should be rejected as CAPTCHA.
-        """
+        """Ανίχνευση CAPTCHA (ισχυρά σήματα)."""
         warning = str(data.get("warning", "")).lower()
         if "captcha" in warning or "humanity" in warning:
             logger.warning(
-                "[%s] CAPTCHA warning field: %r",
-                provider_name,
-                warning[:120],
+                "[%s] CAPTCHA warning field: %r", provider_name, warning[:120]
             )
             return True
 
@@ -147,12 +135,9 @@ class ContentProvider(ABC):
         for kw in STRONG_CAPTCHA_KEYWORDS:
             if kw in content_lower:
                 logger.warning(
-                    "[%s] CAPTCHA keyword %r detected",
-                    provider_name,
-                    kw,
+                    "[%s] CAPTCHA keyword %r detected", provider_name, kw
                 )
                 return True
-
         return False
 
 
@@ -160,13 +145,7 @@ class ContentProvider(ABC):
 # JINA PROVIDER
 # ============================================
 class JinaProvider(ContentProvider):
-    """Jina AI provider.
-
-    Search: s.jina.ai with ``X-Respond-With: no-content`` (SERP only).
-    Extract: r.jina.ai (full page content).
-
-    Rate limit: 1 reader call per second.
-    """
+    """Jina AI provider."""
 
     name = "jina"
 
@@ -175,20 +154,10 @@ class JinaProvider(ContentProvider):
         search_helper: Optional[Callable[[str, int], List[Dict[str, str]]]] = None,
         api_key: Optional[str] = None,
     ) -> None:
-        """
-        Args:
-            search_helper: Optional override for the search step. Signature:
-                (target_point: str, max_results: int) -> List[{"url","title"}].
-                If None, uses internal SERP search.
-            api_key: Optional Jina API key. If None, reads st.secrets["JINA_API_KEY"].
-        """
         self._search_helper = search_helper
         self._api_key = api_key
         self._last_reader_call: float = 0.0
 
-    # ------------------------------------------------------------------
-    # API key
-    # ------------------------------------------------------------------
     def _get_api_key(self) -> str:
         if self._api_key:
             return self._api_key
@@ -200,13 +169,10 @@ class JinaProvider(ContentProvider):
         self._api_key = key
         return key
 
-    # ------------------------------------------------------------------
-    # Search
-    # ------------------------------------------------------------------
     def _internal_search(
         self, target_point: str, max_results: int = 6
     ) -> List[Dict[str, str]]:
-        """Call s.jina.ai and return SERP links."""
+        """Κλήση s.jina.ai και επιστροφή SERP links."""
         import requests
 
         if not target_point or not target_point.strip():
@@ -233,8 +199,11 @@ class JinaProvider(ContentProvider):
             if not isinstance(raw, list):
                 return []
 
+            # v4.1: επιτρέπουμε έως JINA_MAX_SERP_RESULTS αποτελέσματα.
+            cap = max(1, min(int(max_results), JINA_MAX_SERP_RESULTS))
+
             links: List[Dict[str, str]] = []
-            for item in raw[: max(1, min(int(max_results), 8))]:
+            for item in raw[:cap]:
                 u = item.get("url") or item.get("link")
                 if not u:
                     continue
@@ -251,16 +220,12 @@ class JinaProvider(ContentProvider):
             logger.exception("[jina] Search error: %s", exc)
             return []
 
-    # ------------------------------------------------------------------
-    # Extract
-    # ------------------------------------------------------------------
     def extract_from_url(self, url: str) -> Optional[Dict[str, Any]]:
         import requests
 
         if not url or not url.strip():
             return None
 
-        # Rate limit
         if self._last_reader_call > 0:
             elapsed = time.monotonic() - self._last_reader_call
             if elapsed < JINA_RATE_LIMIT_SECONDS:
@@ -285,7 +250,6 @@ class JinaProvider(ContentProvider):
             data = payload.get("data", payload)
             content = data.get("content", "") or ""
 
-            # CAPTCHA detection (strong signals only) — Διόρθωση B
             if self.is_captcha_content(data, content, provider_name=self.name):
                 return None
 
@@ -308,21 +272,30 @@ class JinaProvider(ContentProvider):
             logger.exception("[jina] Reader error for %s: %s", url, exc)
             return None
 
-    # ------------------------------------------------------------------
-    # Combined
-    # ------------------------------------------------------------------
     def search_and_extract(
-        self, target_point: str, max_results: int = 6
+        self,
+        target_point: str,
+        max_results: int = 6,
+        site: Optional[str] = None,
+        max_sources: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
+        # v4.0: περιορισμός query σε ένα domain όταν δοθεί `site`.
+        query = f"site:{site} {target_point}" if site else target_point
+
+        # v4.1: override του default (1 για άρθρο, N για Deep Research).
+        target_sources = (
+            max_sources if max_sources is not None else TARGET_VALID_SOURCES
+        )
+
         search_fn = self._search_helper or self._internal_search
-        links = search_fn(target_point, max_results)
+        links = search_fn(query, max_results)
         if not links:
-            logger.warning("[jina] No SERP results for %r", target_point)
+            logger.warning("[jina] No SERP results for %r", query)
             return None
 
         extractions: List[Dict[str, Any]] = []
         for link in links:
-            if len(extractions) >= TARGET_VALID_SOURCES:
+            if len(extractions) >= target_sources:
                 break
             result = self.extract_from_url(link["url"])
             if result:
@@ -342,14 +315,7 @@ class JinaProvider(ContentProvider):
 # TAVILY PROVIDER
 # ============================================
 class TavilyProvider(ContentProvider):
-    """Tavily provider.
-
-    Search + extract in one API call via ``client.search(include_raw_content=True)``.
-    Requires TAVILY_API_KEY in env var OR Streamlit secrets.
-
-    The ``tavily-python`` package is imported lazily so the app doesn't break
-    if it's not installed and Jina is being used instead.
-    """
+    """Tavily provider (search + extract σε ένα API call)."""
 
     name = "tavily"
 
@@ -358,11 +324,9 @@ class TavilyProvider(ContentProvider):
             from tavily import TavilyClient  # noqa: F401 (lazy import)
         except ImportError as exc:
             raise RuntimeError(
-                "tavily-python is not installed. "
-                "Run: pip install tavily-python"
+                "tavily-python is not installed. Run: pip install tavily-python"
             ) from exc
 
-        # Διόρθωση A: env var → st.secrets fallback (Render-friendly).
         self._api_key = api_key or self._resolve_api_key()
         if not self._api_key:
             raise RuntimeError(
@@ -376,7 +340,6 @@ class TavilyProvider(ContentProvider):
 
     @staticmethod
     def _resolve_api_key() -> Optional[str]:
-        """Resolve API key from env var, then Streamlit secrets."""
         key = os.getenv("TAVILY_API_KEY")
         if key:
             return key
@@ -384,12 +347,9 @@ class TavilyProvider(ContentProvider):
             import streamlit as st
 
             return st.secrets.get("TAVILY_API_KEY")
-        except Exception:  # noqa: BLE001 — no Streamlit context
+        except Exception:  # noqa: BLE001
             return None
 
-    # ------------------------------------------------------------------
-    # Extract single URL
-    # ------------------------------------------------------------------
     def extract_from_url(self, url: str) -> Optional[Dict[str, Any]]:
         if not url or not url.strip():
             return None
@@ -414,30 +374,38 @@ class TavilyProvider(ContentProvider):
             logger.exception("[tavily] Extract error for %s: %s", url, exc)
             return None
 
-    # ------------------------------------------------------------------
-    # Combined
-    # ------------------------------------------------------------------
     def search_and_extract(
-        self, target_point: str, max_results: int = 6
+        self,
+        target_point: str,
+        max_results: int = 6,
+        site: Optional[str] = None,
+        max_sources: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
+        target_sources = (
+            max_sources if max_sources is not None else TARGET_VALID_SOURCES
+        )
+
+        kwargs: Dict[str, Any] = {
+            "max_results": max_results,
+            "include_raw_content": True,
+        }
+        if site:
+            kwargs["include_domains"] = [site]
+
         try:
-            response = self._client.search(
-                target_point,
-                max_results=max_results,
-                include_raw_content=True,
-            )
+            response = self._client.search(target_point, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[tavily] Search error: %s", exc)
             return None
 
         results = response.get("results", []) if isinstance(response, dict) else []
         if not results:
-            logger.warning("[tavily] No results for %r", target_point)
+            logger.warning("[tavily] No results for %r (site=%r)", target_point, site)
             return None
 
         extractions: List[Dict[str, Any]] = []
         for r in results:
-            if len(extractions) >= TARGET_VALID_SOURCES:
+            if len(extractions) >= target_sources:
                 break
             content = (r.get("raw_content") or r.get("content") or "").strip()
             if len(content) < MIN_CONTENT_CHARS:
@@ -464,17 +432,7 @@ class TavilyProvider(ContentProvider):
 def get_provider(
     name: Optional[str] = None, **kwargs: Any
 ) -> ContentProvider:
-    """Return a ContentProvider instance.
-
-    Resolution order:
-        1. Explicit ``name`` argument.
-        2. CONTENT_PROVIDER env var.
-        3. Default: "jina".
-
-    v3.0: manual selection only.
-    Future v3.1: wrap in ParallelProvider when CONTENT_PROVIDER_PARALLEL=true.
-    Future v3.2: wrap in FallbackProvider when CONTENT_PROVIDER_FALLBACK set.
-    """
+    """Επιστροφή ContentProvider instance."""
     resolved = (name or os.getenv("CONTENT_PROVIDER", "jina")).lower().strip()
 
     if resolved == "jina":
@@ -493,4 +451,6 @@ __all__ = [
     "get_provider",
     "STRONG_CAPTCHA_KEYWORDS",
     "MIN_CONTENT_CHARS",
+    "TARGET_VALID_SOURCES",
+    "JINA_MAX_SERP_RESULTS",
 ]

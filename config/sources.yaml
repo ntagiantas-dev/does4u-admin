@@ -1,0 +1,88 @@
+# ============================================
+# DOES4U — AI COMPANY WHITELIST
+# ============================================
+companies:
+  openai:
+    display_name: "OpenAI"
+    domains:
+      - "openai.com"
+    news_page: "https://openai.com/news/"
+    feeds:
+      - "https://openai.com/news/rss.xml"
+    has_rss: true
+
+  anthropic:
+    display_name: "Anthropic"
+    domains:
+      - "anthropic.com"
+    news_page: "https://www.anthropic.com/news"
+    feeds: []
+    has_rss: false
+
+  google:
+    display_name: "Google"
+    domains:
+      - "blog.google"
+      - "deepmind.google"
+    news_page: "https://blog.google/technology/ai/"
+    feeds:
+      - "https://blog.google/technology/ai/rss/"
+    has_rss: true
+
+  meta:
+    display_name: "Meta AI"
+    domains:
+      - "ai.meta.com"
+    news_page: "https://ai.meta.com/blog/"
+    feeds: []
+    has_rss: false
+
+  deepseek:
+    display_name: "DeepSeek"
+    domains:
+      - "deepseek.com"
+    news_page: "https://api-docs.deepseek.com/news/"
+    feeds: []
+    has_rss: false
+
+  mistral:
+    display_name: "Mistral AI"
+    domains:
+      - "mistral.ai"
+    news_page: "https://mistral.ai/news/"
+    feeds: []
+    has_rss: false
+
+  huggingface:
+    display_name: "Hugging Face"
+    domains:
+      - "huggingface.co"
+    news_page: "https://huggingface.co/blog"
+    feeds:
+      - "https://huggingface.co/blog/feed.xml"
+    has_rss: true
+
+  xai:
+    display_name: "xAI"
+    domains:
+      - "x.ai"
+    news_page: "https://x.ai/news/"
+    feeds: []
+    has_rss: false
+
+  cohere:
+    display_name: "Cohere"
+    domains:
+      - "cohere.com"
+    news_page: "https://cohere.com/blog"
+    feeds: []
+    has_rss: false
+
+  microsoft:
+    display_name: "Microsoft AI"
+    domains:
+      - "blogs.microsoft.com"
+    news_page: "https://blogs.microsoft.com/ai/"
+    feeds:
+      - "https://blogs.microsoft.com/ai/feed/"
+    has_rss: true
