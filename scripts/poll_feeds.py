@@ -36,7 +36,7 @@ from utils.sources import Company, list_companies  # noqa: E402
 # ============================================
 QUEUE_FILE = _PROJECT_ROOT / "watchlist_queue.json"
 MAX_AGE_HOURS = 48
-SUMMARY_MAX_CHARS = 500
+SUMMARY_MAX_CHARS = 1000
 
 
 # ============================================

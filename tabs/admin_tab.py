@@ -47,7 +47,6 @@ DEFAULT_STATE = {
     "research_results": None,
     "research_query": None,
     "research_company_key": None,
-    # Cache μεταφράσεων: url -> {"title": ..., "summary": ...}
     "translations_cache": {},
 }
 
@@ -145,15 +144,7 @@ def _get_openai_client():
 
 
 def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
-    """Μετάφραση ενός κειμένου στη target_lang μέσω OpenAI.
-
-    Args:
-        text: Το κείμενο προς μετάφραση.
-        target_lang: Γλώσσα προορισμού ("Greek" ή "English").
-
-    Returns:
-        Μεταφρασμένο κείμενο ή None σε αποτυχία.
-    """
+    """Μετάφραση κειμένου στη target_lang μέσω OpenAI."""
     if not text or not text.strip():
         return ""
 
@@ -189,7 +180,7 @@ def _get_or_create_translation(
 ) -> Optional[Dict[str, str]]:
     """Επιστροφή cached μετάφρασης ή δημιουργία νέας.
 
-    Cache key: f"{url}|{target_lang}" — ίδιο URL, ίδια γλώσσα = ίδια μετάφραση.
+    Cache key: f"{url}|{target_lang}".
     """
     cache = st.session_state.get("translations_cache", {})
     cache_key = f"{url}|{target_lang}"
@@ -413,7 +404,7 @@ def _render_news_card(
     company_key: Optional[str] = None,
     button_key_prefix: str = "gen",
 ) -> None:
-    """Κάρτα ειδήσεων με κουμπιά Μετάφραση + Generate."""
+    """Κάρτα ειδήσεων με κουμπιά Μετάφραση + Generate + Open Original link."""
     company_name = (
         item.get("company_name")
         or item.get("company_key", "")
@@ -425,43 +416,41 @@ def _render_news_card(
     summary = item.get("summary") or item.get("description") or ""
     url = item.get("url") or ""
 
-    # Έλεγχος αν υπάρχει ήδη μετάφραση
     cache = st.session_state.get("translations_cache", {})
     cache_key = f"{url}|Greek"
     translated = cache.get(cache_key)
 
     with st.container(border=True):
-        st.caption(f"{company_name} | {published}")
-
-        # -------------- Τίτλος --------------
+        # ---------- 1. Τίτλος (πρώτα) ----------
         if translated:
-            # Δείχνουμε ΚΑΙ τα δύο: ελληνικό + αγγλικό (σε italic)
             st.markdown(f"### 🇬🇷 {translated.get('title', title)}")
-            st.caption(f"🇬🇧 *{title}*")
         else:
             st.markdown(f"### {title}")
 
-        # -------------- Σύνοψη --------------
+        # ---------- 2. Caption (εταιρία | ημερομηνία) ----------
+        st.caption(f"{company_name} | {published}")
+
+        # ---------- 3. Αγγλικός τίτλος σε italic (αν έχει μετάφραση) ----------
+        if translated:
+            st.caption(f"🇬🇧 *{title}*")
+
+        # ---------- 4. Σύνοψη ως κανονική παράγραφος ----------
         if summary:
             if translated and translated.get("summary"):
                 st.write(translated["summary"])
-                st.caption(f"🇬🇧 *{summary[:300]}...*" if len(summary) > 300 else f"🇬🇧 *{summary}*")
+                st.caption(f"🇬🇧 *{summary}*")
             else:
                 st.write(summary)
 
-        st.caption(f"🔗 {url}")
-
-        # -------------- Κουμπιά --------------
+        # ---------- 5. Κουμπιά ----------
         col1, col2, col3 = st.columns([1, 1, 2])
 
         with col1:
-            # Κουμπί Μετάφραση / Επαναφορά
             if translated:
                 if st.button(
                     "🔄 Επαναφορά",
                     key=f"untr_{button_key_prefix}_{url}",
                 ):
-                    # Αφαιρούμε τη μετάφραση από το cache για ΑΥΤΟ το URL
                     cache.pop(cache_key, None)
                     st.session_state["translations_cache"] = cache
                     st.rerun()
@@ -488,6 +477,10 @@ def _render_news_card(
                 st.success(
                     "✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**."
                 )
+
+        # ---------- 6. Open Original link ----------
+        if url:
+            st.markdown(f"[🔗 Open Original]({url})")
 
 
 def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
@@ -581,7 +574,6 @@ def render_admin_tab() -> None:
 
     for key, value in DEFAULT_STATE.items():
         if key not in st.session_state:
-            # Χρήση copy για dict/list ώστε να μην μοιραζόμαστε reference
             if isinstance(value, (dict, list)):
                 st.session_state[key] = value.copy()
             else:
@@ -707,7 +699,6 @@ def render_admin_tab() -> None:
                                     research_company_key
                                 )
 
-        # Εμφάνιση αποτελεσμάτων
         research_results = st.session_state.get("research_results")
         research_company_key_stored = st.session_state.get("research_company_key")
         research_query_stored = st.session_state.get("research_query")
