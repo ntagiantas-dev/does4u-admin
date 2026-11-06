@@ -26,7 +26,6 @@ MAX_DRAFTS_IN_HISTORY = 30
 
 DEEP_RESEARCH_MAX_CANDIDATES = 10
 
-# Μοντέλο για μεταφράσεις
 TRANSLATION_MODEL = "gpt-4o-mini"
 TRANSLATION_MAX_TOKENS = 500
 
@@ -40,9 +39,8 @@ CATEGORY_NAMES: List[str] = list(BLOG_CATEGORIES.keys())
 
 
 # ============================================
-# ΦΙΛΤΡΑ DEEP RESEARCH (v4.2)
+# ΦΙΛΤΡΑ DEEP RESEARCH
 # ============================================
-# Blacklist: URLs που ΠΟΤΕ δεν είναι άρθρα.
 URL_BLACKLIST = [
     "/pricing",
     "/privacy",
@@ -62,7 +60,6 @@ URL_BLACKLIST = [
     "/tos",
 ]
 
-# Whitelist: URLs που ΕΙΝΑΙ άρθρα (υπερισχύει του heuristic).
 URL_WHITELIST = [
     "/news",
     "/blog",
@@ -75,7 +72,6 @@ URL_WHITELIST = [
     "/announcements",
 ]
 
-# Γενικοί τίτλοι που απορρίπτονται ακόμα κι αν το URL περνάει.
 GENERIC_TITLES = {
     "pricing",
     "privacy",
@@ -169,7 +165,6 @@ def save_blog(articles: List[Dict]) -> bool:
 
 
 def load_watchlist() -> List[Dict[str, Any]]:
-    """Φόρτωση όλων των items από το watchlist_queue.json (RSS 48h)."""
     if not os.path.exists(WATCHLIST_FILE):
         return []
     try:
@@ -184,7 +179,6 @@ def load_watchlist() -> List[Dict[str, Any]]:
 
 
 def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
-    """Φόρτωση items για συγκεκριμένη εταιρία."""
     return [i for i in load_watchlist() if i.get("company_key") == company_key]
 
 
@@ -193,7 +187,6 @@ def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
 # ============================================
 
 def _get_openai_client():
-    """Επιστροφή OpenAI client (cached στο session_state)."""
     if "openai_client" in st.session_state:
         return st.session_state["openai_client"]
 
@@ -211,7 +204,6 @@ def _get_openai_client():
 
 
 def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
-    """Μετάφραση κειμένου στη target_lang μέσω OpenAI."""
     if not text or not text.strip():
         return ""
 
@@ -242,13 +234,9 @@ def _translate_text(text: str, target_lang: str = "Greek") -> Optional[str]:
 def _get_or_create_translation(
     url: str,
     title: str,
-    summary: str,
+    snippet: str,
     target_lang: str = "Greek",
 ) -> Optional[Dict[str, str]]:
-    """Επιστροφή cached μετάφρασης ή δημιουργία νέας.
-
-    Cache key: f"{url}|{target_lang}".
-    """
     cache = st.session_state.get("translations_cache", {})
     cache_key = f"{url}|{target_lang}"
 
@@ -256,11 +244,11 @@ def _get_or_create_translation(
         return cache[cache_key]
 
     translated_title = _translate_text(title, target_lang) or title
-    translated_summary = _translate_text(summary, target_lang) if summary else ""
+    translated_snippet = _translate_text(snippet, target_lang) if snippet else ""
 
     result = {
         "title": translated_title,
-        "summary": translated_summary,
+        "snippet": translated_snippet,
     }
     cache[cache_key] = result
     st.session_state["translations_cache"] = cache
@@ -272,62 +260,38 @@ def _get_or_create_translation(
 # ============================================
 
 def _is_article_url(url: str) -> bool:
-    """Έλεγχος αν το URL είναι άρθρο (blog/news) και όχι στατική σελίδα.
-
-    Λογική:
-        1. Blacklist -> πάντα reject (/pricing, /privacy, ...).
-        2. Whitelist -> πάντα keep (/news, /blog, /research, ...).
-        3. Root / near-root -> keep (η αρχική μπορεί να έχει νέα).
-        4. Heuristic: τελευταίο segment >= 15 chars ΚΑΙ περιέχει "-"
-           -> μοιάζει με slug άρθρου -> keep.
-        5. Default -> reject (πιο ασφαλές).
-    """
     if not url:
         return False
 
     parsed = urlparse(url)
     path = (parsed.path or "/").lower()
 
-    # 1) Blacklist
     for blocked in URL_BLACKLIST:
         if blocked in path:
             return False
 
-    # 2) Whitelist
     for allowed in URL_WHITELIST:
         if allowed in path:
             return True
 
-    # 3) Root ή near-root
     stripped = path.rstrip("/")
     if stripped in ("", "/en", "/el", "/gr"):
         return True
 
-    # 4) Heuristic: slug-like τελευταίο segment
     segments = [s for s in path.split("/") if s]
     if segments:
         last = segments[-1]
         if len(last) >= 15 and "-" in last:
             return True
 
-    # 5) Default reject
     return False
 
 
 def _is_valid_article_title(title: str) -> bool:
-    """Έλεγχος αν ο τίτλος είναι ουσιαστικός (όχι generic/κενός).
-
-    Λογική:
-        - Κενό / None -> reject.
-        - "untitled" / "(untitled)" / "no title" -> reject.
-        - Γενικός τίτλος (pricing, home, ...) -> reject.
-        - Λιγότερες από 3 λέξεις -> reject.
-    """
     if not title or not title.strip():
         return False
 
     normalized = title.strip().lower()
-
     if normalized in GENERIC_TITLES:
         return False
 
@@ -341,15 +305,6 @@ def _is_valid_article_title(title: str) -> bool:
 def _filter_research_results(
     results: List[Dict[str, str]],
 ) -> Tuple[List[Dict[str, str]], int]:
-    """Φιλτράρισμα αποτελεσμάτων Deep Research.
-
-    Args:
-        results: Λίστα από {"url", "title", "domain"}.
-
-    Returns:
-        (filtered_results, rejected_count) — ο χρήστης μπορεί να δει πόσα
-        απορρίφθηκαν ως "σκουπίδια" και να καταλάβει τι έγινε.
-    """
     if not results:
         return [], 0
 
@@ -363,11 +318,9 @@ def _filter_research_results(
         if not _is_article_url(url):
             rejected += 1
             continue
-
         if not _is_valid_article_title(title):
             rejected += 1
             continue
-
         filtered.append(r)
 
     return filtered, rejected
@@ -507,23 +460,11 @@ def _deep_research(
     query: str,
     site: str,
 ) -> Tuple[List[Dict[str, str]], int]:
-    """Βαθύτερη αναζήτηση στο επίσημο site μιας εταιρίας.
-
-    Στρατηγική:
-        1. Query A: exact match `"query"` — πιο ακριβές.
-        2. Query B: loose match (χωρίς quotes) — φέρνει περισσότερα.
-        3. Συνδυασμός + dedupe by URL.
-        4. Φιλτράρισμα "σκουπιδιών" (pricing, privacy, untitled).
-
-    Returns:
-        (filtered_results, rejected_count)
-    """
     if not query or not query.strip():
         return [], 0
 
     results_by_url: Dict[str, Dict[str, str]] = {}
 
-    # Query A: exact phrase
     exact_query = f'"{query}"'
     try:
         merged_a = provider.search_and_extract(
@@ -540,7 +481,6 @@ def _deep_research(
     except Exception as exc:
         st.warning(f"⚠️ Exact-match query απέτυχε: {exc}")
 
-    # Query B: loose match
     try:
         merged_b = provider.search_and_extract(
             query,
@@ -557,10 +497,7 @@ def _deep_research(
         st.warning(f"⚠️ Loose query απέτυχε: {exc}")
 
     raw_results = list(results_by_url.values())
-
-    # Φιλτράρισμα "σκουπιδιών"
     filtered, rejected = _filter_research_results(raw_results)
-
     return filtered[:DEEP_RESEARCH_MAX_CANDIDATES], rejected
 
 
@@ -574,7 +511,6 @@ def _set_pending_generation(
     target_point: str,
     title: str,
 ) -> None:
-    """Αποθήκευση στοιχείων για το επόμενο βήμα (Generate Article tab)."""
     st.session_state["pending_feed_item_url"] = url
     st.session_state["pending_company_key"] = company_key
     st.session_state["pending_target_point"] = target_point
@@ -588,7 +524,11 @@ def _render_news_card(
     company_key: Optional[str] = None,
     button_key_prefix: str = "gen",
 ) -> None:
-    """Κάρτα ειδήσεων με κουμπιά Μετάφραση + Generate + Open Original link."""
+    """Κάρτα ειδήσεων με snippet + Μετάφραση + Generate + Open Original.
+
+    v4.2: snippet fallback chain = snippet -> summary -> description.
+    Αν λείπει όλο το chain, δεν εμφανίζεται τίποτα (δεν σπάει).
+    """
     company_name = (
         item.get("company_name")
         or item.get("company_key", "")
@@ -597,8 +537,15 @@ def _render_news_card(
     )
     published = (item.get("published_at") or "")[:10] or "—"
     title = item.get("title") or "(χωρίς τίτλο)"
-    summary = item.get("summary") or item.get("description") or ""
     url = item.get("url") or ""
+
+    # v4.2: snippet fallback chain
+    snippet = (
+        item.get("snippet")
+        or item.get("summary")
+        or item.get("description")
+        or ""
+    ).strip()
 
     cache = st.session_state.get("translations_cache", {})
     cache_key = f"{url}|Greek"
@@ -611,20 +558,20 @@ def _render_news_card(
         else:
             st.markdown(f"### {title}")
 
-        # 2. Caption (εταιρία | ημερομηνία)
+        # 2. Caption
         st.caption(f"{company_name} | {published}")
 
-        # 3. Αγγλικός τίτλος σε italic (αν έχει μετάφραση)
+        # 3. Αγγλικός τίτλος (italic, μόνο αν μεταφρασμένο)
         if translated:
             st.caption(f"🇬🇧 *{title}*")
 
-        # 4. Σύνοψη ως κανονική παράγραφος
-        if summary:
-            if translated and translated.get("summary"):
-                st.write(translated["summary"])
-                st.caption(f"🇬🇧 *{summary}*")
+        # 4. Snippet (ή μετάφραση)
+        if snippet:
+            if translated and translated.get("snippet"):
+                st.write(translated["snippet"])
+                st.caption(f"🇬🇧 *{snippet}*")
             else:
-                st.write(summary)
+                st.write(snippet)
 
         # 5. Κουμπιά
         col1, col2, col3 = st.columns([1, 1, 2])
@@ -644,7 +591,7 @@ def _render_news_card(
                     key=f"tr_{button_key_prefix}_{url}",
                 ):
                     with st.spinner("🌐 Μετάφραση..."):
-                        _get_or_create_translation(url, title, summary, "Greek")
+                        _get_or_create_translation(url, title, snippet, "Greek")
                     st.rerun()
 
         with col2:
@@ -662,7 +609,7 @@ def _render_news_card(
                     "✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**."
                 )
 
-        # 6. Open Original link
+        # 6. Open Original
         if url:
             st.markdown(f"[🔗 Open Original]({url})")
 
@@ -754,7 +701,7 @@ def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
 # ============================================
 
 def render_admin_tab() -> None:
-    """Render των τεσσάρων καρτελών του admin."""
+    """Render των τεσσάρων καρτελών."""
 
     for key, value in DEFAULT_STATE.items():
         if key not in st.session_state:
@@ -808,7 +755,7 @@ def render_admin_tab() -> None:
         st.caption(
             "Ψάχνει **βαθιά** στο επίσημο site της εταιρίας (exact + loose match), "
             "φιλτράρει pricing/privacy/untitled σελίδες, και σου δείχνει "
-            "**μόνο άρθρα**. Διαλέγεις ΕΝΑ — αυτό θα είναι η πηγή."
+            "**μόνο άρθρα με περίληψη**. Διαλέγεις ΕΝΑ — αυτό θα είναι η πηγή."
         )
 
         companies = list_companies()
@@ -897,7 +844,6 @@ def render_admin_tab() -> None:
                                         f"ως μη-άρθρα."
                                     )
 
-        # Εμφάνιση αποτελεσμάτων
         research_results = st.session_state.get("research_results")
         research_company_key_stored = st.session_state.get("research_company_key")
         research_query_stored = st.session_state.get("research_query")
@@ -909,11 +855,12 @@ def render_admin_tab() -> None:
                 f"η πηγή του άρθρου:"
             )
             for src in research_results:
+                # v4.2: περνάει το snippet από το src dict στην κάρτα
                 _render_news_card(
                     {
                         "title": src.get("title") or src.get("url"),
                         "url": src.get("url"),
-                        "summary": "",
+                        "snippet": src.get("snippet", ""),
                         "company_key": research_company_key_stored,
                         "company_name": company_map.get(
                             research_company_key_stored or "", ""

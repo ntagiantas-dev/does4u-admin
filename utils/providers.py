@@ -1,17 +1,9 @@
 """
 Content providers για το does4u admin panel.
 
-Αφαίρεση εξάρτησης από συγκεκριμένο backend: το article_generator δεν ξέρει
-ποιος provider τρέχει.
-
 v4.0 (D-020): primary-source-only pipeline.
-    - Μόνο 1 source ανά άρθρο (TARGET_VALID_SOURCES = 1).
-    - Providers δέχονται `site` για περιορισμό αναζήτησης σε ένα domain.
-
-v4.1 (TASK-214-UI): Deep Research.
-    - Υποστήριξη πολλαπλών candidates (max_sources) ώστε ο χρήστης να
-      διαλέγει ΠΟΙΟ από αυτά θα γίνει το 1 source του άρθρου.
-    - SERP cap αυξημένο (8 -> 20) για βαθύτερη αναζήτηση στο domain.
+v4.1 (TASK-214-UI): max_sources για Deep Research candidates.
+v4.2: snippet propagation (description από Jina, content από Tavily).
 """
 from __future__ import annotations
 
@@ -37,7 +29,6 @@ STRONG_CAPTCHA_KEYWORDS = [
 ]
 
 MIN_CONTENT_CHARS = 500
-# v4.0: το τελικό άρθρο έχει ΠΑΝΤΑ 1 source.
 TARGET_VALID_SOURCES = 1
 
 # Jina specific
@@ -45,8 +36,10 @@ JINA_SEARCH_BASE = "https://s.jina.ai"
 JINA_READER_BASE = "https://r.jina.ai"
 JINA_TIMEOUT = 30
 JINA_RATE_LIMIT_SECONDS = 1.0
-# v4.1: επιτρέπουμε βαθύτερη SERP (Deep Research).
 JINA_MAX_SERP_RESULTS = 20
+
+# Μέγιστο μήκος snippet (για να μη γεμίζει η κάρτα με τεράστιο κείμενο)
+MAX_SNIPPET_CHARS = 400
 
 
 # ============================================
@@ -73,24 +66,24 @@ class ContentProvider(ABC):
         site: Optional[str] = None,
         max_sources: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Αναζήτηση + εξαγωγή περιεχομένου για ένα target point.
+        """Αναζήτηση + εξαγωγή περιεχομένου.
 
         Args:
             target_point: Το query.
-            max_results: Μέγιστα SERP hits (έως JINA_MAX_SERP_RESULTS).
+            max_results: Μέγιστα SERP hits.
             site: Προαιρετικό domain για περιορισμό (v4.0).
             max_sources: Override του TARGET_VALID_SOURCES.
-                - None  -> 1 (default για δημιουργία άρθρου).
-                - N > 1 -> N candidates (για Deep Research, ο χρήστης
-                  διαλέγει 1 από αυτά).
 
         Επιστρέφει:
             {
                 "target_point": str,
-                "sources": List[{"url": str, "title": str, "domain": str}],
+                "sources": List[{
+                    "url": str, "title": str, "domain": str,
+                    "snippet": str,   # v4.2 — μικρή περίληψη
+                }],
                 "content": str,
             }
-            ή None σε αποτυχία.
+            ή None.
         """
 
     # ------------------------------------------------------------------
@@ -100,7 +93,10 @@ class ContentProvider(ABC):
     def merge_extractions(
         extractions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Συνένωση N extractions σε ένα content blob + λίστα sources."""
+        """Συνένωση N extractions σε ένα content blob + λίστα sources.
+
+        v4.2: διατηρεί το `snippet` αν υπάρχει στο extraction.
+        """
         parts: List[str] = []
         sources: List[Dict[str, str]] = []
 
@@ -108,8 +104,20 @@ class ContentProvider(ABC):
             url = ext.get("url", "")
             title = ext.get("title", "") or url
             domain = urlparse(url).netloc.lower() if url else ""
+            snippet = ext.get("snippet", "") or ""
 
-            sources.append({"url": url, "title": title, "domain": domain})
+            # Περιορισμός snippet
+            if snippet and len(snippet) > MAX_SNIPPET_CHARS:
+                snippet = snippet[:MAX_SNIPPET_CHARS].rstrip() + "…"
+
+            sources.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "domain": domain,
+                    "snippet": snippet,
+                }
+            )
             parts.append(f"# Source: {title}\nURL: {url}\n\n{ext.get('content', '')}")
 
         return {
@@ -172,7 +180,10 @@ class JinaProvider(ContentProvider):
     def _internal_search(
         self, target_point: str, max_results: int = 6
     ) -> List[Dict[str, str]]:
-        """Κλήση s.jina.ai και επιστροφή SERP links."""
+        """Κλήση s.jina.ai και επιστροφή SERP links.
+
+        Κάθε link περιέχει url + title + description (snippet).
+        """
         import requests
 
         if not target_point or not target_point.strip():
@@ -199,7 +210,6 @@ class JinaProvider(ContentProvider):
             if not isinstance(raw, list):
                 return []
 
-            # v4.1: επιτρέπουμε έως JINA_MAX_SERP_RESULTS αποτελέσματα.
             cap = max(1, min(int(max_results), JINA_MAX_SERP_RESULTS))
 
             links: List[Dict[str, str]] = []
@@ -262,10 +272,13 @@ class JinaProvider(ContentProvider):
                 )
                 return None
 
+            # Το description από τον reader μπορεί να είναι snippet, αν λείπει
+            # θα το συμπληρώσουμε από το SERP στο search_and_extract.
             return {
                 "url": url,
                 "title": data.get("title", "") or url,
                 "content": content,
+                "snippet": data.get("description", "") or "",
             }
 
         except Exception as exc:  # noqa: BLE001
@@ -279,10 +292,8 @@ class JinaProvider(ContentProvider):
         site: Optional[str] = None,
         max_sources: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        # v4.0: περιορισμός query σε ένα domain όταν δοθεί `site`.
         query = f"site:{site} {target_point}" if site else target_point
 
-        # v4.1: override του default (1 για άρθρο, N για Deep Research).
         target_sources = (
             max_sources if max_sources is not None else TARGET_VALID_SOURCES
         )
@@ -301,6 +312,9 @@ class JinaProvider(ContentProvider):
             if result:
                 if not result.get("title") and link.get("title"):
                     result["title"] = link["title"]
+                # v4.2: snippet από SERP description (αν δεν το έχει ήδη ο reader)
+                if not result.get("snippet") and link.get("description"):
+                    result["snippet"] = link["description"]
                 extractions.append(result)
 
         if not extractions:
@@ -365,10 +379,17 @@ class TavilyProvider(ContentProvider):
                     "[tavily] Content too short (%d chars) for %s", len(content), url
                 )
                 return None
+
+            # v4.2: snippet από τα πρώτα 400 chars του content
+            snippet = content[:MAX_SNIPPET_CHARS].rstrip() + (
+                "…" if len(content) > MAX_SNIPPET_CHARS else ""
+            )
+
             return {
                 "url": r.get("url", url),
                 "title": r.get("title", "") or url,
                 "content": content,
+                "snippet": snippet,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("[tavily] Extract error for %s: %s", url, exc)
@@ -410,11 +431,23 @@ class TavilyProvider(ContentProvider):
             content = (r.get("raw_content") or r.get("content") or "").strip()
             if len(content) < MIN_CONTENT_CHARS:
                 continue
+
+            # v4.2: snippet — προτιμάμε το content (είναι ήδη σύντομο στο SERP),
+            # αλλιώς τα πρώτα 400 chars του raw_content.
+            snippet = r.get("content") or ""
+            if not snippet and content:
+                snippet = content[:MAX_SNIPPET_CHARS].rstrip() + (
+                    "…" if len(content) > MAX_SNIPPET_CHARS else ""
+                )
+            if snippet and len(snippet) > MAX_SNIPPET_CHARS:
+                snippet = snippet[:MAX_SNIPPET_CHARS].rstrip() + "…"
+
             extractions.append(
                 {
                     "url": r.get("url", ""),
                     "title": r.get("title", "") or r.get("url", ""),
                     "content": content,
+                    "snippet": snippet,
                 }
             )
 
@@ -453,4 +486,5 @@ __all__ = [
     "MIN_CONTENT_CHARS",
     "TARGET_VALID_SOURCES",
     "JINA_MAX_SERP_RESULTS",
+    "MAX_SNIPPET_CHARS",
 ]

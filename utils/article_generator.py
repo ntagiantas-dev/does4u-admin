@@ -1,20 +1,7 @@
 """
-Article generation pipeline for the does4u admin panel (v4.0, D-020).
+Article generation pipeline (v4.0, D-020 — primary-source-only).
 
-PRIMARY-SOURCE-ONLY pipeline:
-    Fetch (exactly 1 primary source)
-        -> Cleaner
-        -> Writer (per language, per category, with citations)
-        -> Teasers (per language, per category, with fallback)
-        -> ## Sources section appended programmatically
-
-Ingestion modes (what the user picks in the UI):
-    - "RSS (today's items)"  : read a specific item from watchlist_queue.json.
-    - "Restricted Search"    : SERP restricted to the company's domain.
-    - "Manual URL"           : user pastes a specific URL.
-
-Companies come from config/sources.yaml (whitelist of 10 AI companies).
-Provider abstraction is in utils.providers (Jina / Tavily).
+v4.2: διατήρηση snippet από provider sources (Deep Research preview).
 """
 import json
 import logging
@@ -36,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
-# LANGUAGE OPTIONS
+# ΓΛΩΣΣΕΣ
 # ============================================
 LANGUAGE_OPTIONS: Dict[str, Dict[str, str]] = {
     "greek": {"name": "Greek", "native": "Ελληνικά", "code": "el"},
@@ -44,7 +31,7 @@ LANGUAGE_OPTIONS: Dict[str, Dict[str, str]] = {
 }
 
 # ============================================
-# INGESTION MODES (v4.0)
+# INGESTION MODES
 # ============================================
 INGESTION_MODE_RSS = "RSS (today's items)"
 INGESTION_MODE_RESTRICTED = "Restricted Search"
@@ -56,7 +43,7 @@ INGESTION_MODES = [
 ]
 
 # ============================================
-# MODEL CONFIG
+# ΜΟΝΤΕΛΑ
 # ============================================
 BLOG_MODEL = "gpt-5.6-luna"
 
@@ -78,10 +65,10 @@ FALLBACK_RAW_CONTENT_CHARS = 4000
 
 
 # ============================================
-# MODULE-LEVEL HELPERS
+# MODULE HELPERS
 # ============================================
 def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
-    """Build teasers from the first sentences when the LLM fails."""
+    """Fallback teasers από τις πρώτες προτάσεις."""
     sentences = [s.strip() for s in article_text.split(".") if s.strip()]
     first = ". ".join(sentences[:2]) + "." if sentences else ""
     if not first:
@@ -97,7 +84,7 @@ def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
 def append_sources_section(
     article_markdown: str, sources: List[Dict[str, str]]
 ) -> str:
-    """Append a '## Sources' section, REPLACING any existing one."""
+    """Προσάρτηση ## Sources, αντικαθιστώντας τυχόν υπάρχον."""
     if "## Sources" in article_markdown:
         idx = article_markdown.find("## Sources")
         article_markdown = article_markdown[:idx].rstrip()
@@ -120,10 +107,10 @@ def append_sources_section(
 
 
 # ============================================
-# MAIN CLASS
+# ΚΥΡΙΑ ΚΛΑΣΗ
 # ============================================
 class ArticleGenerator:
-    """Blog article generation pipeline (v4.0 — primary-source-only)."""
+    """Pipeline δημιουργίας άρθρου (primary-source-only)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -143,7 +130,7 @@ class ArticleGenerator:
             return [LANGUAGE_OPTIONS["greek"]]
         if sel in ("english", "en", "αγγλικά"):
             return [LANGUAGE_OPTIONS["english"]]
-        logger.warning("Unknown language %r — defaulting to Greek", selection)
+        logger.warning("Unknown language %r — default Greek", selection)
         return [LANGUAGE_OPTIONS["greek"]]
 
     @staticmethod
@@ -391,14 +378,14 @@ class ArticleGenerator:
             return result
 
         logger.warning(
-            "[Teasers/%s/%s] Both models failed — using text fallback",
+            "[Teasers/%s/%s] Both models failed — text fallback",
             category,
             language,
         )
         return generate_fallback_teasers(article_text)
 
     # ------------------------------------------------------------------
-    # Full pipeline (v4.0 — primary-source-only)
+    # Full pipeline
     # ------------------------------------------------------------------
     def full_pipeline(
         self,
@@ -409,25 +396,6 @@ class ArticleGenerator:
         feed_item_url: Optional[str] = None,
         language_selection: str = "Greek",
     ) -> Dict[str, Any]:
-        """Run the full pipeline: fetch 1 primary source -> clean -> write -> teasers.
-
-        Args:
-            target_point: SEO topic / search query.
-            category: One of BLOG_CATEGORIES keys.
-            company_key: Whitelisted company (see config/sources.yaml).
-            ingestion_mode: INGESTION_MODE_RSS / _RESTRICTED / _MANUAL.
-            feed_item_url: Required for RSS and Manual modes.
-            language_selection: "Greek" | "English" | "Both".
-
-        Returns:
-            {
-              "cleaner": {...},
-              "sources": [single source],
-              "company": {...},
-              "category_slug": "ai-updates" | "growth-hack",
-              "bundles": [...],
-            }
-        """
         empty_result: Dict[str, Any] = {
             "cleaner": {},
             "sources": [],
@@ -443,7 +411,6 @@ class ArticleGenerator:
             return empty_result
         empty_result["category_slug"] = cfg["slug"]
 
-        # Resolve company
         try:
             from utils.sources import get_company
 
@@ -457,7 +424,6 @@ class ArticleGenerator:
             st.error(f"❌ Unknown company: {exc}")
             return empty_result
 
-        # ---- Fetch (1 source) ----
         raw_content, sources = self._fetch_content(
             ingestion_mode=ingestion_mode,
             target_point=target_point,
@@ -468,19 +434,18 @@ class ArticleGenerator:
             st.error("❌ No content could be fetched. Pipeline aborted.")
             return empty_result
 
-        # ---- Cleaner ----
         with st.spinner("🧹 Cleaning content..."):
             cleaner_output = self.clean_content(raw_content, target_point)
 
         if not cleaner_output:
             truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
             logger.warning(
-                "[Pipeline] Cleaner failed — fallback to truncated raw (%d chars)",
+                "[Pipeline] Cleaner failed — fallback (%d chars)",
                 len(truncated),
             )
             st.warning(
-                f"⚠️ Cleaner failed — falling back to raw content "
-                f"(truncated to {FALLBACK_RAW_CONTENT_CHARS} chars)."
+                f"⚠️ Cleaner failed — fallback στο raw content "
+                f"({FALLBACK_RAW_CONTENT_CHARS} chars)."
             )
             cleaner_output = {
                 "cleaned_content": truncated,
@@ -489,7 +454,6 @@ class ArticleGenerator:
                 "_fallback": True,
             }
 
-        # ---- Writer + Teasers per language ----
         targets = self.resolve_languages(language_selection)
         translation_id: Optional[str] = str(uuid.uuid4()) if len(targets) > 1 else None
 
@@ -546,7 +510,7 @@ class ArticleGenerator:
         }
 
     # ------------------------------------------------------------------
-    # Fetch (v4.0 — exactly 1 primary source)
+    # Fetch (v4.2 — snippet-aware)
     # ------------------------------------------------------------------
     def _fetch_content(
         self,
@@ -556,15 +520,7 @@ class ArticleGenerator:
         company_key: str,
         feed_item_url: Optional[str] = None,
     ) -> tuple[str, List[Dict[str, str]]]:
-        """Fetch exactly 1 source based on ingestion_mode.
-
-        - RSS: use feed_item_url directly (already vetted from a feed).
-        - Manual URL: use feed_item_url directly (user-provided).
-        - Restricted Search: SERP restricted to company.primary_domain.
-
-        Returns:
-            (raw_content, sources) with at most 1 source. Both empty on failure.
-        """
+        """Fetch 1 source. v4.2: sources περιέχουν snippet όπου είναι εφικτό."""
         from utils.providers import get_provider
         from utils.sources import get_company
 
@@ -581,12 +537,11 @@ class ArticleGenerator:
             st.error(f"❌ Unknown company: {exc}")
             return "", []
 
-        # ---------- RSS or Manual URL ----------
+        # ---------- RSS ή Manual URL ----------
         if ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL):
             if not feed_item_url:
                 st.error(
-                    f"❌ {ingestion_mode} mode requires a URL "
-                    f"(feed_item_url is empty)."
+                    f"❌ {ingestion_mode} requires a URL (feed_item_url empty)."
                 )
                 return "", []
 
@@ -603,6 +558,7 @@ class ArticleGenerator:
                     "url": url,
                     "title": result.get("title", "") or url,
                     "domain": urlparse(url).netloc.lower(),
+                    "snippet": result.get("snippet", "") or "",
                 }
             ]
             return result.get("content", ""), sources
@@ -612,13 +568,12 @@ class ArticleGenerator:
             primary = company.primary_domain
             if not primary:
                 st.error(
-                    f"❌ {company.display_name} has no configured domain for "
-                    f"restricted search."
+                    f"❌ {company.display_name} has no domain for restricted search."
                 )
                 return "", []
 
             if not target_point or not target_point.strip():
-                st.error("❌ Restricted Search mode requires a topic.")
+                st.error("❌ Restricted Search requires a topic.")
                 return "", []
 
             with st.spinner(f"🔍 Searching {primary} (restricted)..."):
@@ -627,16 +582,13 @@ class ArticleGenerator:
                 )
 
             if not merged or not merged.get("sources"):
-                st.error(
-                    f"❌ No results for {target_point!r} on {primary}."
-                )
+                st.error(f"❌ No results for {target_point!r} on {primary}.")
                 return "", []
 
-            # v4.0: keep only the first (highest-ranked) source.
+            # v4.0: 1 source. v4.2: διατηρεί snippet.
             sources = merged["sources"][:1]
             return merged.get("content", ""), sources
 
-        # ---------- Unknown mode ----------
         st.error(f"❌ Unknown ingestion mode: {ingestion_mode!r}")
         return "", []
 
@@ -664,9 +616,6 @@ class ArticleGenerator:
         return slug[:80] or "untitled"
 
 
-# ============================================
-# LOCAL TEST ENTRYPOINT
-# ============================================
 if __name__ == "__main__":
     generator = ArticleGenerator()
     output = generator.full_pipeline(
