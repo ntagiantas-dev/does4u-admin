@@ -1,13 +1,14 @@
 """
-Company source registry.
+Μητρώο πηγών εταιριών.
 
-Loads `config/sources.yaml`, validates it, and exposes Company dataclasses
-to the rest of the pipeline (article_generator, admin_tab, poll_feeds).
+Διαβάζει το `config/sources.yaml`, το επικυρώνει και εκθέτει Company
+dataclasses στην υπόλοιπη εφαρμογή (article_generator, admin_tab, poll_feeds).
 
-The YAML file is the single source of truth for:
-    - Which companies we consider primary sources (D-020).
-    - Which domains are allowed for restricted search.
-    - Which RSS feeds (if any) we can poll.
+Το YAML είναι η μοναδική πηγή αλήθειας για:
+    - Ποιες εταιρίες θεωρούνται πρωτογενείς πηγές (D-020).
+    - Ποια domains επιτρέπονται για restricted search.
+    - Ποια RSS feeds (αν υπάρχουν) μπορούμε να διαβάσουμε.
+    - Αν υπάρχει Google News RSS fallback (για εταιρίες χωρίς δικό τους RSS).
 """
 from __future__ import annotations
 
@@ -22,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
-# CONFIG
+# ΡΥΘΜΙΣΕΙΣ
 # ============================================
-# Path resolution: <project_root>/config/sources.yaml
+# Διαδρομή: <project_root>/config/sources.yaml
 SOURCES_FILE = Path(__file__).resolve().parent.parent / "config" / "sources.yaml"
 
 
@@ -33,7 +34,7 @@ SOURCES_FILE = Path(__file__).resolve().parent.parent / "config" / "sources.yaml
 # ============================================
 @dataclass(frozen=True)
 class Company:
-    """A primary-source AI company from the whitelist."""
+    """Μια πρωτογενής πηγή AI εταιρίας από το whitelist."""
 
     key: str
     display_name: str
@@ -41,34 +42,36 @@ class Company:
     news_page: str = ""
     feeds: List[str] = field(default_factory=list)
     has_rss: bool = False
+    # v4.0: fallback σε Google News RSS όταν has_rss=false
+    google_news_fallback: bool = False
 
     @property
     def primary_domain(self) -> Optional[str]:
-        """The first domain in the list, used for restricted search."""
+        """Το πρώτο domain στη λίστα, για restricted search."""
         return self.domains[0] if self.domains else None
 
 
 # ============================================
-# MODULE STATE
+# ΚΑΤΑΣΤΑΣΗ MODULE
 # ============================================
 _cache: Optional[Dict[str, Company]] = None
 
 
 # ============================================
-# PUBLIC API
+# ΔΗΜΟΣΙΟ API
 # ============================================
 def load_sources(path: Optional[Path] = None) -> Dict[str, Company]:
-    """Load and validate companies from sources.yaml.
+    """Φόρτωση και επικύρωση εταιριών από το sources.yaml.
 
     Args:
-        path: Optional override. Defaults to config/sources.yaml.
+        path: Προαιρετικό override. Default: config/sources.yaml.
 
     Returns:
-        Mapping of company key -> Company.
+        Mapping από company key -> Company.
 
     Raises:
-        FileNotFoundError: If the YAML file does not exist.
-        ValueError: If the file is malformed.
+        FileNotFoundError: Αν το YAML δεν υπάρχει.
+        ValueError: Αν το αρχείο είναι malformed.
     """
     global _cache
     if _cache is not None and path is None:
@@ -109,6 +112,8 @@ def load_sources(path: Optional[Path] = None) -> Dict[str, Company]:
             news_page=str(cfg.get("news_page") or ""),
             feeds=[str(f) for f in feeds],
             has_rss=bool(cfg.get("has_rss", False)),
+            # v4.0: νέο πεδίο — fallback σε Google News RSS
+            google_news_fallback=bool(cfg.get("google_news_fallback", False)),
         )
 
     logger.info("[sources] Loaded %d companies from %s", len(companies), file_path)
@@ -119,10 +124,10 @@ def load_sources(path: Optional[Path] = None) -> Dict[str, Company]:
 
 
 def get_company(key: str) -> Company:
-    """Look up a single company by key.
+    """Lookup μιας εταιρίας by key.
 
     Raises:
-        ValueError: If the key is not registered.
+        ValueError: Αν το key δεν είναι εγγεγραμμένο.
     """
     companies = load_sources()
     if key not in companies:
@@ -133,7 +138,7 @@ def get_company(key: str) -> Company:
 
 
 def list_companies() -> List[Company]:
-    """Return all companies, sorted by display_name (stable order)."""
+    """Επιστροφή όλων των εταιριών, ταξινομημένες κατά display_name."""
     return sorted(load_sources().values(), key=lambda c: c.display_name.lower())
 
 

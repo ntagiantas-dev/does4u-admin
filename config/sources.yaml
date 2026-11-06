@@ -1,88 +1,116 @@
 # ============================================
-# DOES4U — AI COMPANY WHITELIST
+# DOES4U — ΜΗΤΡΩΟ ΕΠΙΣΗΜΩΝ ΠΗΓΩΝ
 # ============================================
+# Μόνο αυτά τα domains επιτρέπονται για δημιουργία άρθρων.
+# Ο CEO μπορεί να προσθέσει/αφαιρέσει εταιρίες.
+#
+# Πεδία:
+#   display_name:          Ανθρώπινο όνομα
+#   domains:               Επίσημα domains (πρώτο = primary για restricted)
+#   news_page:             Σελίδα νέων (για ανθρώπους)
+#   feeds:                 RSS feeds (αν υπάρχουν)
+#   has_rss:               Αν έχει δικό του RSS
+#   google_news_fallback:  Αν true, χρησιμοποιείται Google News RSS όταν
+#                          has_rss=false (fallback για εταιρίες χωρίς RSS)
+# ============================================
+
 companies:
+
   openai:
-    display_name: "OpenAI"
+    display_name: OpenAI
     domains:
-      - "openai.com"
-    news_page: "https://openai.com/news/"
+      - openai.com
+      - platform.openai.com
+    news_page: https://openai.com/news/
     feeds:
-      - "https://openai.com/news/rss.xml"
+      - https://openai.com/news/rss.xml
     has_rss: true
+    google_news_fallback: false
 
   anthropic:
-    display_name: "Anthropic"
+    display_name: Anthropic
     domains:
-      - "anthropic.com"
-    news_page: "https://www.anthropic.com/news"
+      - anthropic.com
+      - docs.anthropic.com
+    news_page: https://www.anthropic.com/news
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   google:
-    display_name: "Google"
+    display_name: Google / DeepMind
     domains:
-      - "blog.google"
-      - "deepmind.google"
-    news_page: "https://blog.google/technology/ai/"
+      - blog.google
+      - deepmind.google
+    news_page: https://blog.google/technology/ai/
     feeds:
-      - "https://blog.google/technology/ai/rss/"
+      - https://blog.google/technology/ai/rss/
     has_rss: true
+    google_news_fallback: false
 
   meta:
-    display_name: "Meta AI"
+    display_name: Meta AI
     domains:
-      - "ai.meta.com"
-    news_page: "https://ai.meta.com/blog/"
+      - ai.meta.com
+    news_page: https://ai.meta.com/blog/
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   deepseek:
-    display_name: "DeepSeek"
+    display_name: DeepSeek
     domains:
-      - "deepseek.com"
-    news_page: "https://api-docs.deepseek.com/news/"
+      - deepseek.com
+      - api-docs.deepseek.com
+    news_page: https://api-docs.deepseek.com/news
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   mistral:
-    display_name: "Mistral AI"
+    display_name: Mistral AI
     domains:
-      - "mistral.ai"
-    news_page: "https://mistral.ai/news/"
+      - mistral.ai
+    news_page: https://mistral.ai/news/
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   huggingface:
-    display_name: "Hugging Face"
+    display_name: HuggingFace
     domains:
-      - "huggingface.co"
-    news_page: "https://huggingface.co/blog"
+      - huggingface.co
+    news_page: https://huggingface.co/blog
     feeds:
-      - "https://huggingface.co/blog/feed.xml"
+      - https://huggingface.co/blog/feed.xml
     has_rss: true
+    google_news_fallback: false
 
   xai:
-    display_name: "xAI"
+    display_name: xAI
     domains:
-      - "x.ai"
-    news_page: "https://x.ai/news/"
+      - x.ai
+    news_page: https://x.ai/news
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   cohere:
-    display_name: "Cohere"
+    display_name: Cohere
     domains:
-      - "cohere.com"
-    news_page: "https://cohere.com/blog"
+      - cohere.com
+    news_page: https://cohere.com/blog
     feeds: []
     has_rss: false
+    google_news_fallback: true
 
   microsoft:
-    display_name: "Microsoft AI"
+    display_name: Microsoft AI
     domains:
-      - "blogs.microsoft.com"
-    news_page: "https://blogs.microsoft.com/ai/"
+      - microsoft.com
+      - blogs.microsoft.com
+    news_page: https://blogs.microsoft.com/ai/
     feeds:
-      - "https://blogs.microsoft.com/ai/feed/"
+      - https://blogs.microsoft.com/feed/
     has_rss: true
+    google_news_fallback: false
