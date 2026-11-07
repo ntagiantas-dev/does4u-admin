@@ -100,7 +100,7 @@ FINALIZE_PROMPT = """Μετέτρεψε τα παρακάτω δεδομένα �
 
 
 # ============================================
-# BLOG — CLEANER (γλωσσικά-ουδέτερο)
+# BLOG — CLEANER
 # ============================================
 CLEANER_PROMPT = """You are a content cleaner for an SEO blog.
 
@@ -128,11 +128,6 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 # ============================================
 # BLOG — CITATION INSTRUCTIONS
-# ============================================
-# Εγχέεται στα article prompts.
-# Χρησιμοποιεί inline Markdown links ΑΝΤΙ για [1], [2] — πιο φυσικό για τον
-# αναγνώστη και πιο σωστό για SEO (external links = authority signals).
-# Απαιτεί υποχρεωτικά ## Sources section στο τέλος.
 # ============================================
 CITATION_INSTRUCTIONS = """CITATIONS & SOURCES FORMAT:
 
@@ -165,7 +160,7 @@ AVAILABLE SOURCES:
 
 
 # ============================================
-# BLOG — WRITER: AI UPDATES (traffic-focused)
+# BLOG — WRITER: AI UPDATES
 # ============================================
 ARTICLE_GENERATION_PROMPT_AI_UPDATES = """You are an SEO content writer for a premium automation agency.
 
@@ -241,7 +236,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — WRITER: GROWTH HACK (conversion-focused)
+# BLOG — WRITER: GROWTH HACK (με Custom Idea support)
 # ============================================
 ARTICLE_GENERATION_PROMPT_GROWTH_HACK = """You are an SEO content writer for a premium automation agency.
 
@@ -260,6 +255,13 @@ INPUT:
 
 {citation_instructions}
 
+NOTE ON CUSTOM IDEAS (Growth Hack):
+If the "Cleaned source content" describes a scenario, business problem, or
+automation idea FROM OUR OWN TEAM (not an external source), treat it as the
+AUTHORITATIVE BRIEF. Write the article as a pitch based on that scenario.
+Do NOT cite external sources — there are none. The idea IS the source.
+Focus on: the cost of the problem, the automation solution, and a clear CTA.
+
 STRUCTURE:
 1. SEO Title (50-60 chars, includes the primary keyword AND signals a benefit)
 2. URL slug (see SLUG RULES)
@@ -276,7 +278,7 @@ STRUCTURE:
    + END WITH A SPECIFIC QUESTION: pose a question that makes the reader
      realize the cost of NOT acting (e.g. "Πόσες ώρες χάνετε κάθε εβδομάδα
      σε αυτή τη διαδικασία;"). The question must be concrete, NOT generic.
-7. Sources section (`## Sources` — mandatory, see CITATION instructions)
+7. Sources section (`## Sources` — mandatory, ONLY if external sources used)
 8. 5 SEO keywords
 
 FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
@@ -312,8 +314,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
   "word_count": 800,
   "reading_time_minutes": 4,
   "sources": [
-    {{"id": 1, "title": "...", "url": "..."}},
-    {{"id": 2, "title": "...", "url": "..."}}
+    {{"id": 1, "title": "...", "url": "..."}}
   ]
 }}"""
 

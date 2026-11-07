@@ -1,26 +1,15 @@
 """
-Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.0, D-020).
+Pipeline δημιουργίας άρθρου (v4.1 — Custom Idea mode).
 
-PRIMARY-SOURCE-ONLY pipeline:
-    Fetch (ακριβώς 1 πρωτογενής πηγή)
-        -> Cleaner (καθαρισμός περιεχομένου)
-        -> Writer (Sol — φυσικό ελληνικό ύφος + inline citations)
-        -> Teasers (Sol, fallback σε 4o-mini)
-        -> ## Sources section (programmatic append)
+Primary-source-only pipeline (D-020) + Custom Idea mode για Growth Hack.
 
 Ingestion modes:
     - "RSS (today's items)"  : item από watchlist_queue.json.
     - "Restricted Search"    : SERP περιορισμένο στο domain της εταιρίας.
     - "Manual URL"           : URL που δίνει ο χρήστης.
-
-Companies από config/sources.yaml (whitelist 10 AI εταιριών).
-Providers: utils.providers (Jina / Tavily).
-
-Model notes (v4.0):
-    - BLOG_MODEL = gpt-5.6-sol — καλύτερη ποιότητα γραψίματος, φυσικό ύφος,
-      σωστή διαχείριση citations. Κόστος ~10x από luna, αλλά αμελητέο για
-      1 άρθρο/ημέρα.
-    - TEASER_FALLBACK_MODEL = gpt-4o-mini — φθηνό fallback αν ο Sol αποτύχει.
+    - "Custom Idea (Growth Hack)" : η δική μας ιδέα ως πηγή.
+                                    Skip fetch + cleaner.
+                                    Sol γράφει pitch βασισμένο στο κείμενο.
 """
 import json
 import logging
@@ -55,23 +44,22 @@ LANGUAGE_OPTIONS: Dict[str, Dict[str, str]] = {
 INGESTION_MODE_RSS = "RSS (today's items)"
 INGESTION_MODE_RESTRICTED = "Restricted Search"
 INGESTION_MODE_MANUAL = "Manual URL"
+INGESTION_MODE_CUSTOM = "Custom Idea (Growth Hack)"
 INGESTION_MODES = [
     INGESTION_MODE_RSS,
     INGESTION_MODE_RESTRICTED,
     INGESTION_MODE_MANUAL,
+    INGESTION_MODE_CUSTOM,
 ]
 
 # ============================================
 # ΜΟΝΤΕΛΑ
 # ============================================
-# v4.0: ΑΛΛΑΓΗ ΣΕ SOL. Ο Sol γράφει με φυσικό δημοσιογραφικό ύφος,
-# διαχειρίζεται σωστά τα inline citations (markdown links) και ακολουθεί
-# πιστά το ## Sources format. Αξίζει το κόστος για premium περιεχόμενο.
-BLOG_MODEL = "gpt-5.6-sol"
-
-CLEANER_MODEL = BLOG_MODEL
-WRITER_MODEL = BLOG_MODEL
-TEASER_MODEL = BLOG_MODEL
+# Writer = Sol (φυσικό γράψιμο + citations)
+# Cleaner + Teasers = Luna (αρκεί, φθηνό)
+CLEANER_MODEL = "gpt-5.6-luna"
+WRITER_MODEL = "gpt-5.6-sol"
+TEASER_MODEL = "gpt-5.6-luna"
 TEASER_FALLBACK_MODEL = "gpt-4o-mini"
 
 CLEANER_MAX_TOKENS = 4000
@@ -90,12 +78,10 @@ FALLBACK_RAW_CONTENT_CHARS = 4000
 # MODULE HELPERS
 # ============================================
 def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
-    """Fallback teasers από τις πρώτες προτάσεις."""
     sentences = [s.strip() for s in article_text.split(".") if s.strip()]
     first = ". ".join(sentences[:2]) + "." if sentences else ""
     if not first:
         first = "Read our latest article."
-
     return {
         "twitter": {"text": first[:280], "length": 280},
         "linkedin": {"text": first[:300], "length": 300},
@@ -106,12 +92,6 @@ def generate_fallback_teasers(article_text: str) -> Dict[str, Dict[str, Any]]:
 def append_sources_section(
     article_markdown: str, sources: List[Dict[str, str]]
 ) -> str:
-    """Προσάρτηση ## Sources section, αντικαθιστώντας τυχόν υπάρχον.
-
-    Αν ο LLM έγραψε δικό του ## Sources, το αφαιρούμε και βάζουμε το
-    authoritative (fetched) — έτσι εγγυόμαστε ότι δεν υπάρχουν
-    hallucinated URLs στο τέλος.
-    """
     if "## Sources" in article_markdown:
         idx = article_markdown.find("## Sources")
         article_markdown = article_markdown[:idx].rstrip()
@@ -137,7 +117,7 @@ def append_sources_section(
 # ΚΥΡΙΑ ΚΛΑΣΗ
 # ============================================
 class ArticleGenerator:
-    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.0)."""
+    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.1)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -145,9 +125,6 @@ class ArticleGenerator:
             raise ValueError("OPENAI_API_KEY not found in Streamlit secrets")
         self.client: OpenAI = OpenAI(api_key=self.api_key)
 
-    # ------------------------------------------------------------------
-    # Resolution helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def resolve_languages(selection: str) -> List[Dict[str, str]]:
         sel = (selection or "").strip().lower()
@@ -187,7 +164,6 @@ class ArticleGenerator:
         max_tokens: int,
         stage: str,
     ) -> Optional[str]:
-        """Κλήση OpenAI. Empty response -> 1 retry με 2x budget."""
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -200,9 +176,7 @@ class ArticleGenerator:
                 retry_tokens = max_tokens * EMPTY_RESPONSE_RETRY_MULTIPLIER
                 logger.warning(
                     "[%s] Empty response from %s — retry with %d tokens",
-                    stage,
-                    model,
-                    retry_tokens,
+                    stage, model, retry_tokens,
                 )
                 response = self.client.chat.completions.create(
                     model=model,
@@ -234,10 +208,8 @@ class ArticleGenerator:
         attempts = max_retries + 1
         for attempt in range(1, attempts + 1):
             raw = self._call_llm(
-                model=model,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                stage=stage,
+                model=model, prompt=prompt,
+                max_tokens=max_tokens, stage=stage,
             )
             if raw is None:
                 return None
@@ -288,10 +260,8 @@ class ArticleGenerator:
             raw_content=raw_content[:MAX_RAW_CONTENT_CHARS],
         )
         result = self._call_llm_json(
-            model=CLEANER_MODEL,
-            prompt=prompt,
-            max_tokens=CLEANER_MAX_TOKENS,
-            stage="Cleaner",
+            model=CLEANER_MODEL, prompt=prompt,
+            max_tokens=CLEANER_MAX_TOKENS, stage="Cleaner",
         )
         if not result or not result.get("cleaned_content"):
             logger.error("[Cleaner] Missing cleaned_content")
@@ -343,8 +313,7 @@ class ArticleGenerator:
             citation_instructions=citation_instructions,
         )
         result = self._call_llm_json(
-            model=WRITER_MODEL,
-            prompt=prompt,
+            model=WRITER_MODEL, prompt=prompt,
             max_tokens=WRITER_MAX_TOKENS,
             stage=f"Writer/{category}/{language}",
         )
@@ -382,8 +351,7 @@ class ArticleGenerator:
         )
 
         result = self._call_llm_json(
-            model=TEASER_MODEL,
-            prompt=prompt,
+            model=TEASER_MODEL, prompt=prompt,
             max_tokens=TEASER_MAX_TOKENS,
             stage=f"Teasers/{category}/{language}",
         )
@@ -392,28 +360,20 @@ class ArticleGenerator:
 
         logger.warning(
             "[Teasers/%s/%s] Primary model failed, trying %s",
-            category,
-            language,
-            TEASER_FALLBACK_MODEL,
+            category, language, TEASER_FALLBACK_MODEL,
         )
         result = self._call_llm_json(
-            model=TEASER_FALLBACK_MODEL,
-            prompt=prompt,
+            model=TEASER_FALLBACK_MODEL, prompt=prompt,
             max_tokens=TEASER_FALLBACK_MAX_TOKENS,
             stage=f"Teasers-fallback/{category}/{language}",
         )
         if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
             return result
 
-        logger.warning(
-            "[Teasers/%s/%s] Both models failed — text fallback",
-            category,
-            language,
-        )
         return generate_fallback_teasers(article_text)
 
     # ------------------------------------------------------------------
-    # Full pipeline
+    # Full pipeline (v4.1 — με Custom Idea support)
     # ------------------------------------------------------------------
     def full_pipeline(
         self,
@@ -423,7 +383,19 @@ class ArticleGenerator:
         ingestion_mode: str = INGESTION_MODE_RESTRICTED,
         feed_item_url: Optional[str] = None,
         language_selection: str = "Greek",
+        custom_idea: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Full pipeline.
+
+        Args:
+            target_point: SEO topic hint.
+            category: BLOG_CATEGORIES key.
+            company_key: Whitelisted company (αγνοείται σε Custom mode).
+            ingestion_mode: RSS / Restricted / Manual / Custom.
+            feed_item_url: Required για RSS/Manual.
+            language_selection: Greek / English / Both.
+            custom_idea: Required για Custom mode. Το κείμενο της ιδέας του CEO.
+        """
         empty_result: Dict[str, Any] = {
             "cleaner": {},
             "sources": [],
@@ -439,49 +411,75 @@ class ArticleGenerator:
             return empty_result
         empty_result["category_slug"] = cfg["slug"]
 
-        try:
-            from utils.sources import get_company
+        # ---------- Custom Idea mode: skip fetch + cleaner ----------
+        if ingestion_mode == INGESTION_MODE_CUSTOM:
+            if not custom_idea or not custom_idea.strip():
+                st.error("❌ Custom Idea mode requires an idea description.")
+                return empty_result
 
-            company = get_company(company_key)
-            empty_result["company"] = {
-                "key": company.key,
-                "display_name": company.display_name,
-                "domains": company.domains,
-            }
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"❌ Unknown company: {exc}")
-            return empty_result
-
-        raw_content, sources = self._fetch_content(
-            ingestion_mode=ingestion_mode,
-            target_point=target_point,
-            company_key=company_key,
-            feed_item_url=feed_item_url,
-        )
-        if not raw_content:
-            st.error("❌ No content could be fetched. Pipeline aborted.")
-            return empty_result
-
-        with st.spinner("🧹 Cleaning content..."):
-            cleaner_output = self.clean_content(raw_content, target_point)
-
-        if not cleaner_output:
-            truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
-            logger.warning(
-                "[Pipeline] Cleaner failed — fallback (%d chars)",
-                len(truncated),
+            logger.info(
+                "[Pipeline] Custom Idea mode — using %d chars as source",
+                len(custom_idea),
             )
-            st.warning(
-                f"⚠️ Cleaner failed — fallback στο raw content "
-                f"({FALLBACK_RAW_CONTENT_CHARS} chars)."
-            )
-            cleaner_output = {
-                "cleaned_content": truncated,
+            raw_content = custom_idea.strip()
+            sources: List[Dict[str, str]] = []
+            cleaner_output: Dict[str, Any] = {
+                "cleaned_content": raw_content,
                 "key_facts": [],
-                "topic_summary": "(fallback — cleaner unavailable)",
+                "topic_summary": "(custom idea — no external source)",
                 "_fallback": True,
             }
+            # Metadata: company = does4u (the idea is our own)
+            empty_result["company"] = {
+                "key": "does4u",
+                "display_name": "Does4U",
+                "domains": [],
+            }
+        else:
+            # ---------- Κανονικό pipeline (fetch + cleaner) ----------
+            try:
+                from utils.sources import get_company
+                company = get_company(company_key)
+                empty_result["company"] = {
+                    "key": company.key,
+                    "display_name": company.display_name,
+                    "domains": company.domains,
+                }
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"❌ Unknown company: {exc}")
+                return empty_result
 
+            raw_content, sources = self._fetch_content(
+                ingestion_mode=ingestion_mode,
+                target_point=target_point,
+                company_key=company_key,
+                feed_item_url=feed_item_url,
+            )
+            if not raw_content:
+                st.error("❌ No content could be fetched. Pipeline aborted.")
+                return empty_result
+
+            with st.spinner("🧹 Cleaning content..."):
+                cleaner_output = self.clean_content(raw_content, target_point)
+
+            if not cleaner_output:
+                truncated = raw_content[:FALLBACK_RAW_CONTENT_CHARS]
+                logger.warning(
+                    "[Pipeline] Cleaner failed — fallback (%d chars)",
+                    len(truncated),
+                )
+                st.warning(
+                    f"⚠️ Cleaner failed — fallback στο raw content "
+                    f"({FALLBACK_RAW_CONTENT_CHARS} chars)."
+                )
+                cleaner_output = {
+                    "cleaned_content": truncated,
+                    "key_facts": [],
+                    "topic_summary": "(fallback — cleaner unavailable)",
+                    "_fallback": True,
+                }
+
+        # ---------- Writer + Teasers per language ----------
         targets = self.resolve_languages(language_selection)
         translation_id: Optional[str] = str(uuid.uuid4()) if len(targets) > 1 else None
 
@@ -503,7 +501,7 @@ class ArticleGenerator:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)
                 continue
 
-            # Εγγύηση ## Sources section (αντικαθιστά τυχόν LLM-generated)
+            # Append sources section (κενό σε Custom mode — δεν προσθέτει τίποτα)
             article["content_markdown"] = append_sources_section(
                 article.get("content_markdown", ""),
                 sources,
@@ -526,7 +524,7 @@ class ArticleGenerator:
                     "article": article,
                     "teasers": teasers,
                     "sources": sources,
-                    "company_key": company_key,
+                    "company_key": empty_result["company"].get("key", company_key),
                 }
             )
 
@@ -549,7 +547,14 @@ class ArticleGenerator:
         company_key: str,
         feed_item_url: Optional[str] = None,
     ) -> tuple[str, List[Dict[str, str]]]:
-        """Fetch 1 source βάσει ingestion_mode."""
+        # Safety: custom mode δεν φτάνει εδώ (γίνεται handled στο full_pipeline)
+        if ingestion_mode == INGESTION_MODE_CUSTOM:
+            logger.warning(
+                "[Fetch] Called with CUSTOM mode — should never happen. "
+                "Returning empty."
+            )
+            return "", []
+
         from utils.providers import get_provider
         from utils.sources import get_company
 
@@ -566,33 +571,26 @@ class ArticleGenerator:
             st.error(f"❌ Unknown company: {exc}")
             return "", []
 
-        # ---------- RSS ή Manual URL ----------
         if ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL):
             if not feed_item_url:
                 st.error(
                     f"❌ {ingestion_mode} requires a URL (feed_item_url empty)."
                 )
                 return "", []
-
             with st.spinner("🔍 Extracting from URL..."):
                 result = provider.extract_from_url(feed_item_url)
-
             if not result:
                 st.error(f"❌ Could not extract content from: {feed_item_url}")
                 return "", []
-
             url = result.get("url", feed_item_url)
-            sources = [
-                {
-                    "url": url,
-                    "title": result.get("title", "") or url,
-                    "domain": urlparse(url).netloc.lower(),
-                    "snippet": result.get("snippet", "") or "",
-                }
-            ]
+            sources = [{
+                "url": url,
+                "title": result.get("title", "") or url,
+                "domain": urlparse(url).netloc.lower(),
+                "snippet": result.get("snippet", "") or "",
+            }]
             return result.get("content", ""), sources
 
-        # ---------- Restricted Search ----------
         if ingestion_mode == INGESTION_MODE_RESTRICTED:
             primary = company.primary_domain
             if not primary:
@@ -600,30 +598,22 @@ class ArticleGenerator:
                     f"❌ {company.display_name} has no domain for restricted search."
                 )
                 return "", []
-
             if not target_point or not target_point.strip():
                 st.error("❌ Restricted Search requires a topic.")
                 return "", []
-
             with st.spinner(f"🔍 Searching {primary} (restricted)..."):
                 merged = provider.search_and_extract(
                     target_point, max_results=6, site=primary
                 )
-
             if not merged or not merged.get("sources"):
                 st.error(f"❌ No results for {target_point!r} on {primary}.")
                 return "", []
-
-            # 1 source (primary-source-only)
             sources = merged["sources"][:1]
             return merged.get("content", ""), sources
 
         st.error(f"❌ Unknown ingestion mode: {ingestion_mode!r}")
         return "", []
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _format_sources_for_prompt(sources: List[Dict[str, str]]) -> str:
         if not sources:
@@ -645,17 +635,14 @@ class ArticleGenerator:
         return slug[:80] or "untitled"
 
 
-# ============================================
-# LOCAL TEST ENTRYPOINT
-# ============================================
 if __name__ == "__main__":
     generator = ArticleGenerator()
     output = generator.full_pipeline(
-        target_point="GPT-6 release",
-        category="AI Updates",
-        company_key="openai",
-        ingestion_mode=INGESTION_MODE_RESTRICTED,
-        feed_item_url=None,
+        target_point="custom pitch",
+        category="Growth Hack",
+        company_key="does4u",
+        ingestion_mode=INGESTION_MODE_CUSTOM,
+        custom_idea="A small business loses 10 hours/week on manual data entry.",
         language_selection="Greek",
     )
     print(json.dumps(output, indent=2, ensure_ascii=False, default=str))

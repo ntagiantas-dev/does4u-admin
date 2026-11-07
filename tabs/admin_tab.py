@@ -12,6 +12,7 @@ from utils.article_generator import (
     INGESTION_MODE_RSS,
     INGESTION_MODE_RESTRICTED,
     INGESTION_MODE_MANUAL,
+    INGESTION_MODE_CUSTOM,
     INGESTION_MODES,
 )
 from utils.sources import list_companies, get_company
@@ -144,10 +145,7 @@ def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
 
 
 def delete_watchlist_item(url: str) -> bool:
-    """Διαγραφή ενός item από το watchlist_queue.json.
-
-    Επίσης καθαρίζει το translation cache για το συγκεκριμένο URL.
-    """
+    """Διαγραφή ενός item από το watchlist_queue.json."""
     if not os.path.exists(WATCHLIST_FILE):
         return False
     try:
@@ -160,12 +158,11 @@ def delete_watchlist_item(url: str) -> bool:
         filtered = [i for i in items if i.get("url") != url]
 
         if len(filtered) == original_len:
-            return False  # δεν βρέθηκε
+            return False
 
         with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
             json.dump(filtered, f, ensure_ascii=False, indent=2)
 
-        # Καθαρισμός translation cache για αυτό το URL
         cache = st.session_state.get("translations_cache", {})
         keys_to_delete = [k for k in cache if k.startswith(f"{url}|")]
         for k in keys_to_delete:
@@ -513,7 +510,7 @@ def _render_news_card(
             else:
                 st.write(snippet)
 
-        # 5. Κουμπιά — 3 στήλες αν show_delete, αλλιώς 2
+        # 5. Κουμπιά
         if show_delete:
             col1, col2, col3 = st.columns([1, 1, 1])
         else:
@@ -695,7 +692,6 @@ def render_admin_tab() -> None:
                 "ή χρησιμοποίησε το Deep Research πιο κάτω."
             )
         else:
-            # Ομαδοποίηση ανά εταιρία
             by_company: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for item in watchlist:
                 ck = item.get("company_key") or "unknown"
@@ -703,7 +699,6 @@ def render_admin_tab() -> None:
 
             company_map = {c.key: c.display_name for c in list_companies()}
 
-            # Ταξινόμηση εταιριών αλφαβητικά
             sorted_company_keys = sorted(
                 by_company.keys(),
                 key=lambda k: company_map.get(k, k).lower(),
@@ -850,7 +845,7 @@ def render_admin_tab() -> None:
                     target_point=research_query_stored or "",
                     company_key=research_company_key_stored,
                     button_key_prefix="research",
-                    show_delete=False,  # Deep Research → όχι delete
+                    show_delete=False,
                 )
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -875,28 +870,7 @@ def render_admin_tab() -> None:
                 f"- **Εταιρία:** {pending_company or '—'}"
             )
 
-        companies = list_companies()
-        company_map = {c.key: c.display_name for c in companies}
-
-        company_keys = list(company_map.keys())
-        default_company_idx = 0
-        if pending_company and pending_company in company_keys:
-            default_company_idx = company_keys.index(pending_company)
-
-        company_key = st.selectbox(
-            "Εταιρία *",
-            options=company_keys,
-            index=default_company_idx,
-            format_func=lambda k: company_map[k],
-            help="Πρωτογενής πηγή — μόνο domains από config/sources.yaml",
-        )
-
-        try:
-            company = get_company(company_key)
-        except Exception as e:
-            st.error(f"❌ Δεν φορτώθηκε η εταιρία {company_key}: {e}")
-            st.stop()
-
+        # --- Category + Language ---
         col1, col2 = st.columns(2)
         with col1:
             category = st.selectbox(
@@ -912,6 +886,7 @@ def render_admin_tab() -> None:
             )
             language_value = LANGUAGE_CHOICES[language_label]
 
+        # --- Ingestion Mode ---
         default_mode_idx = 1
         if pending_url:
             default_mode_idx = 2
@@ -921,62 +896,110 @@ def render_admin_tab() -> None:
             options=INGESTION_MODES,
             index=default_mode_idx,
             horizontal=True,
+            help=(
+                "Custom Idea: μόνο για Growth Hack — γράψε την ιδέα σου, "
+                "ο Sol θα γράψει το pitch."
+            ),
         )
 
-        provider_choice = st.radio(
-            "Content Provider",
-            options=["jina", "tavily"],
-            index=0,
-            horizontal=True,
-        )
-        st.session_state["content_provider"] = provider_choice
-
+        # --- Custom Idea mode: skip company + provider, show textarea ---
+        company_key = ""
+        custom_idea: Optional[str] = None
         feed_item_url: Optional[str] = None
         target_point = ""
 
-        if ingestion_mode == INGESTION_MODE_RSS:
-            if not company.has_rss:
-                st.warning(f"⚠️ Η {company.display_name} δεν έχει RSS feed.")
-            else:
-                items = load_watchlist_for_company(company_key)
-                if not items:
-                    st.info(f"📭 Δεν υπάρχουν items για {company.display_name}.")
+        if ingestion_mode == INGESTION_MODE_CUSTOM:
+            st.info(
+                "💡 **Custom Idea mode:** Γράψε το σενάριο/ιδέα σου. "
+                "Ο Sol θα γράψει το άρθρο βασισμένος σε αυτό — δεν χρειάζεται "
+                "εξωτερική πηγή."
+            )
+            custom_idea = st.text_area(
+                "Περιγράψε την ιδέα/σενάριο που θέλεις να προωθήσεις *",
+                height=200,
+                placeholder=(
+                    "π.χ. Μια μικρή επιχείρηση χάνει 10 ώρες/εβδομάδα σε "
+                    "χειροκίνητη καταχώριση τιμολογίων. Θέλουμε να δείξουμε "
+                    "πώς ο αυτοματισμός εξοικονομεί χρόνο και χρήμα."
+                ),
+            )
+            first_line = (custom_idea or "").strip().split("\n")[0].strip()
+            target_point = first_line[:120] if first_line else ""
+        else:
+            # --- Κανονικό flow: company + provider + mode inputs ---
+            companies = list_companies()
+            company_map = {c.key: c.display_name for c in companies}
+
+            company_keys = list(company_map.keys())
+            default_company_idx = 0
+            if pending_company and pending_company in company_keys:
+                default_company_idx = company_keys.index(pending_company)
+
+            company_key = st.selectbox(
+                "Εταιρία *",
+                options=company_keys,
+                index=default_company_idx,
+                format_func=lambda k: company_map[k],
+                help="Πρωτογενής πηγή — μόνο domains από config/sources.yaml",
+            )
+
+            try:
+                company = get_company(company_key)
+            except Exception as e:
+                st.error(f"❌ Δεν φορτώθηκε η εταιρία {company_key}: {e}")
+                st.stop()
+
+            provider_choice = st.radio(
+                "Content Provider",
+                options=["jina", "tavily"],
+                index=0,
+                horizontal=True,
+            )
+            st.session_state["content_provider"] = provider_choice
+
+            if ingestion_mode == INGESTION_MODE_RSS:
+                if not company.has_rss:
+                    st.warning(f"⚠️ Η {company.display_name} δεν έχει RSS feed.")
                 else:
-                    idx = st.selectbox(
-                        f"Feed item ({len(items)} διαθέσιμα) *",
-                        options=range(len(items)),
-                        format_func=lambda i: (
-                            f"{items[i].get('title', '(χωρίς τίτλο)')} "
-                            f"({items[i].get('published_at') or '—'})"
-                        ),
-                    )
-                    feed_item_url = items[idx].get("url")
-                    st.caption(f"🔗 {feed_item_url}")
+                    items = load_watchlist_for_company(company_key)
+                    if not items:
+                        st.info(f"📭 Δεν υπάρχουν items για {company.display_name}.")
+                    else:
+                        idx = st.selectbox(
+                            f"Feed item ({len(items)} διαθέσιμα) *",
+                            options=range(len(items)),
+                            format_func=lambda i: (
+                                f"{items[i].get('title', '(χωρίς τίτλο)')} "
+                                f"({items[i].get('published_at') or '—'})"
+                            ),
+                        )
+                        feed_item_url = items[idx].get("url")
+                        st.caption(f"🔗 {feed_item_url}")
 
-            target_point = st.text_input(
-                "Θέμα άρθρου (λέξεις-κλειδιά) *",
-                value=pending_topic or "",
-            )
+                target_point = st.text_input(
+                    "Θέμα άρθρου (λέξεις-κλειδιά) *",
+                    value=pending_topic or "",
+                )
 
-        elif ingestion_mode == INGESTION_MODE_MANUAL:
-            feed_item_url = st.text_input(
-                "URL *",
-                value=pending_url or "",
-                placeholder=f"https://{company.primary_domain or 'example.com'}/...",
-            )
-            target_point = st.text_input(
-                "Θέμα άρθρου (λέξεις-κλειδιά) *",
-                value=pending_topic or "",
-            )
+            elif ingestion_mode == INGESTION_MODE_MANUAL:
+                feed_item_url = st.text_input(
+                    "URL *",
+                    value=pending_url or "",
+                    placeholder=f"https://{company.primary_domain or 'example.com'}/...",
+                )
+                target_point = st.text_input(
+                    "Θέμα άρθρου (λέξεις-κλειδιά) *",
+                    value=pending_topic or "",
+                )
 
-        elif ingestion_mode == INGESTION_MODE_RESTRICTED:
-            target_point = st.text_input(
-                "Θέμα αναζήτησης *",
-                value=pending_topic or "",
-                placeholder="π.χ. V3 release",
-            )
-            primary = company.primary_domain or "?"
-            st.caption(f"🔍 Θα ψάξει μόνο στο `{primary}` και θα κρατήσει 1 πηγή.")
+            elif ingestion_mode == INGESTION_MODE_RESTRICTED:
+                target_point = st.text_input(
+                    "Θέμα αναζήτησης *",
+                    value=pending_topic or "",
+                    placeholder="π.χ. V3 release",
+                )
+                primary = company.primary_domain or "?"
+                st.caption(f"🔍 Θα ψάξει μόνο στο `{primary}` και θα κρατήσει 1 πηγή.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -988,13 +1011,18 @@ def render_admin_tab() -> None:
             missing: List[str] = []
             if not category:
                 missing.append("Κατηγορία")
-            if not target_point.strip():
-                missing.append("Θέμα")
-            if (
-                ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL)
-                and not feed_item_url
-            ):
-                missing.append("URL / Feed item")
+
+            if ingestion_mode == INGESTION_MODE_CUSTOM:
+                if not custom_idea or not custom_idea.strip():
+                    missing.append("Custom Idea")
+            else:
+                if not target_point.strip():
+                    missing.append("Θέμα")
+                if (
+                    ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL)
+                    and not feed_item_url
+                ):
+                    missing.append("URL / Feed item")
 
             if missing:
                 st.error(f"❌ Λείπουν: {', '.join(missing)}")
@@ -1014,6 +1042,7 @@ def render_admin_tab() -> None:
                         ingestion_mode=ingestion_mode,
                         feed_item_url=feed_item_url,
                         language_selection=language_value,
+                        custom_idea=custom_idea,
                     )
 
                     st.session_state["last_gen"] = {
