@@ -127,12 +127,12 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — CITATION INSTRUCTIONS
+# BLOG — CITATION INSTRUCTIONS (ΑΥΣΤΗΡΑ LINKS)
 # ============================================
 CITATION_INSTRUCTIONS = """CITATIONS & SOURCES FORMAT:
 
-INLINE CITATIONS — USE MARKDOWN LINKS (ΟΧΙ [1], [2]):
-- Αντί για [1], [2], χρησιμοποίησε inline Markdown links μέσα στο κείμενο.
+INLINE CITATIONS — USE MARKDOWN LINKS (ΑΠΑΓΟΡΕΥΕΤΑΙ ΤΟ [1], [2]):
+- Χρησιμοποίησε inline Markdown links μέσα στο κείμενο.
 - Παράδειγμα: [σύμφωνα με την επίσημη ανακοίνωση](https://url.com).
 - Κάθε factual claim (στατιστικό, απόσπασμα, ημερομηνία, τιμή) πρέπει να
   συνοδεύεται από inline link στην πηγή του.
@@ -160,7 +160,7 @@ AVAILABLE SOURCES:
 
 
 # ============================================
-# BLOG — WRITER: AI UPDATES
+# BLOG — WRITER: AI UPDATES (PREMIUM FACT-CHECKING)
 # ============================================
 ARTICLE_GENERATION_PROMPT_AI_UPDATES = """You are an SEO content writer for a premium automation agency.
 
@@ -178,26 +178,31 @@ INPUT:
 
 {citation_instructions}
 
+🚨 PREMIUM FACT-CHECKING & FORMATTING RULES (STRICTLY ENFORCED):
+1. DATES: Always mention the release date or announcement date in the first paragraph, IF it is provided in the source.
+2. BENCHMARKS: If the source provides performance numbers or comparisons with other models (e.g., Opus, GPT-4), CREATE A MARKDOWN TABLE to present them. Always attribute the numbers to the source (e.g., "According to DeepSeek's data...").
+3. PRICING: Look for pricing. If the source provides pricing details, include a concrete cost example (e.g., "$X per 1 million tokens" or "$X per image").
+4. ZERO HALLUCINATION: If something is not explicitly stated in the source, DO NOT assume or write it. Stick strictly to the facts provided. Do not invent features, dates, or numbers.
+5. LINKS: Use inline Markdown links everywhere. DO NOT use [1], [2]. (e.g., [σύμφωνα με την επίσημη ανακοίνωση](URL)).
+
 STRUCTURE:
 1. SEO Title (50-60 chars, includes the primary keyword)
 2. URL slug (see SLUG RULES)
 3. Meta Description (150-160 chars)
 4. Intro (2 paragraphs): open with a surprising fact, a recent development, or
-   a question about what changed. Promise clarity.
+   a question about what changed. Promise clarity. INCLUDE THE DATE.
 5. 3-4 sections with H2 headings. Suggested flow:
    - What happened / What's new
+   - Benchmarks / Technical details (with table if applicable)
+   - Pricing / Availability (if applicable)
    - Why it matters for businesses
-   - What readers should watch next
 6. Conclusion: brief takeaway + soft call-to-action
    (e.g. "Follow for more AI updates" — NOT a sales pitch)
-   + END WITH A SPECIFIC QUESTION: pose an engaging question that invites
-     the reader to reflect on or comment about how this development affects
-     their own business/team. The question must be concrete, NOT generic
-     ("What do you think?" is forbidden).
+   + END WITH A SPECIFIC QUESTION to engage the reader.
 7. Sources section (`## Sources` — mandatory, see CITATION instructions)
 8. 5 SEO keywords
 
-FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
+FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists and tables where useful)
 
 LANGUAGE RULES:
 - Write the ENTIRE article DIRECTLY in {language}. DO NOT translate —
@@ -236,7 +241,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 
 
 # ============================================
-# BLOG — WRITER: GROWTH HACK (με Custom Idea support)
+# BLOG — WRITER: GROWTH HACK (PREMIUM FACT-CHECKING)
 # ============================================
 ARTICLE_GENERATION_PROMPT_GROWTH_HACK = """You are an SEO content writer for a premium automation agency.
 
@@ -254,6 +259,13 @@ INPUT:
 - Key facts: {key_facts}
 
 {citation_instructions}
+
+🚨 PREMIUM FACT-CHECKING & FORMATTING RULES (STRICTLY ENFORCED):
+1. DATES: Always mention the release date or announcement date in the first paragraph, IF it is provided in the source.
+2. BENCHMARKS: If the source provides performance numbers or comparisons, CREATE A MARKDOWN TABLE to present them. Always attribute the numbers to the source.
+3. PRICING: Look for pricing. If the source provides pricing details, include a concrete cost example.
+4. ZERO HALLUCINATION: If something is not explicitly stated in the source, DO NOT assume or write it. Stick strictly to the facts provided. Do not invent features, dates, or numbers.
+5. LINKS: Use inline Markdown links everywhere. DO NOT use [1], [2]. (e.g., [σύμφωνα με την επίσημη ανακοίνωση](URL)).
 
 NOTE ON CUSTOM IDEAS (Growth Hack):
 If the "Cleaned source content" describes a scenario, business problem, or
@@ -275,13 +287,11 @@ STRUCTURE:
    - A mini case example or realistic scenario with measurable results
 6. Conclusion: strong call-to-action — invite the reader to book a call,
    request a free automation audit, or contact Does4U.
-   + END WITH A SPECIFIC QUESTION: pose a question that makes the reader
-     realize the cost of NOT acting (e.g. "Πόσες ώρες χάνετε κάθε εβδομάδα
-     σε αυτή τη διαδικασία;"). The question must be concrete, NOT generic.
+   + END WITH A SPECIFIC QUESTION that makes the reader realize the cost of NOT acting.
 7. Sources section (`## Sources` — mandatory, ONLY if external sources used)
 8. 5 SEO keywords
 
-FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists where useful)
+FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists and tables where useful)
 
 LANGUAGE RULES:
 - Write the ENTIRE article DIRECTLY in {language}. DO NOT translate —
