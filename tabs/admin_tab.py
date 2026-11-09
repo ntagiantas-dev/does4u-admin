@@ -69,6 +69,7 @@ DEFAULT_STATE = {
     "pending_company_key": None,
     "pending_target_point": None,
     "pending_source_title": None,
+    "pending_source_date": None,  # <--- ΝΕΟ: Ημερομηνία πηγής
     "research_results": None,
     "research_query": None,
     "research_company_key": None,
@@ -145,7 +146,6 @@ def load_watchlist_for_company(company_key: str) -> List[Dict[str, Any]]:
 
 
 def delete_watchlist_item(url: str) -> bool:
-    """Διαγραφή ενός item από το watchlist_queue.json."""
     if not os.path.exists(WATCHLIST_FILE):
         return False
     try:
@@ -450,12 +450,13 @@ def _deep_research(provider, query: str, site: str) -> Tuple[List[Dict[str, str]
 # ============================================
 
 def _set_pending_generation(
-    url: str, company_key: str, target_point: str, title: str,
+    url: str, company_key: str, target_point: str, title: str, source_date: Optional[str] = None
 ) -> None:
     st.session_state["pending_feed_item_url"] = url
     st.session_state["pending_company_key"] = company_key
     st.session_state["pending_target_point"] = target_point
     st.session_state["pending_source_title"] = title
+    st.session_state["pending_source_date"] = source_date  # <--- ΝΕΟ
 
 
 def _render_news_card(
@@ -466,14 +467,17 @@ def _render_news_card(
     button_key_prefix: str = "gen",
     show_delete: bool = False,
 ) -> None:
-    """Κάρτα ειδήσεων με Μετάφραση + Generate + (προαιρετικά) Διαγραφή."""
     company_name = (
         item.get("company_name")
         or item.get("company_key", "")
         or company_key
         or "—"
     )
-    published = (item.get("published_at") or "")[:10] or "—"
+    
+    # Παίρνουμε την ημερομηνία (είτε από το RSS, είτε από το Deep Research αν υπάρχει)
+    published_raw = item.get("published_at") or item.get("published") or ""
+    published = str(published_raw)[:10] if published_raw else "—"
+    
     title = item.get("title") or "(χωρίς τίτλο)"
     url = item.get("url") or ""
 
@@ -489,20 +493,16 @@ def _render_news_card(
     translated = cache.get(cache_key)
 
     with st.container(border=True):
-        # 1. Τίτλος
         if translated:
             st.markdown(f"### 🇬🇷 {translated.get('title', title)}")
         else:
             st.markdown(f"### {title}")
 
-        # 2. Caption
         st.caption(f"{company_name} | {published}")
 
-        # 3. Αγγλικός τίτλος
         if translated:
             st.caption(f"🇬🇧 *{title}*")
 
-        # 4. Snippet
         if snippet:
             if translated and translated.get("snippet"):
                 st.write(translated["snippet"])
@@ -510,7 +510,6 @@ def _render_news_card(
             else:
                 st.write(snippet)
 
-        # 5. Κουμπιά
         if show_delete:
             col1, col2, col3 = st.columns([1, 1, 1])
         else:
@@ -518,51 +517,36 @@ def _render_news_card(
 
         with col1:
             if translated:
-                if st.button(
-                    "🔄 Επαναφορά",
-                    key=f"untr_{button_key_prefix}_{url}",
-                ):
+                if st.button("🔄 Επαναφορά", key=f"untr_{button_key_prefix}_{url}"):
                     cache.pop(cache_key, None)
                     st.session_state["translations_cache"] = cache
                     st.rerun()
             else:
-                if st.button(
-                    "🌐 Μετάφραση",
-                    key=f"tr_{button_key_prefix}_{url}",
-                ):
+                if st.button("🌐 Μετάφραση", key=f"tr_{button_key_prefix}_{url}"):
                     with st.spinner("🌐 Μετάφραση..."):
                         _get_or_create_translation(url, title, snippet, "Greek")
                     st.rerun()
 
         with col2:
-            if st.button(
-                "🚀 Generate",
-                key=f"{button_key_prefix}_{url}",
-            ):
+            if st.button("🚀 Generate", key=f"{button_key_prefix}_{url}"):
                 _set_pending_generation(
                     url=url,
                     company_key=item.get("company_key") or company_key or "",
                     target_point=target_point or title,
                     title=title,
+                    source_date=published if published != "—" else None,
                 )
-                st.success(
-                    "✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**."
-                )
+                st.success("✅ Έτοιμο! Πήγαινε στην καρτέλα **📝 Generate Article**.")
 
         if show_delete:
             with col3:
-                if st.button(
-                    "🗑️ Διαγραφή",
-                    key=f"del_{button_key_prefix}_{url}",
-                    help="Διαγραφή από το queue",
-                ):
+                if st.button("🗑️ Διαγραφή", key=f"del_{button_key_prefix}_{url}", help="Διαγραφή από το queue"):
                     if delete_watchlist_item(url):
                         st.success("✅ Διαγράφηκε")
                         st.rerun()
                     else:
                         st.error("❌ Αποτυχία διαγραφής")
 
-        # 6. Open Original
         if url:
             st.markdown(f"[🔗 Open Original]({url})")
 
@@ -585,6 +569,13 @@ def _render_article_preview(bundle: Dict[str, Any], category: str) -> None:
         )
         kws = a.get("keywords") or []
         st.markdown(f"**Λέξεις-κλειδιά:** {', '.join(kws) if kws else '—'}")
+
+        # Εμφάνιση Flags από το backend (v4.4)
+        flags = bundle.get("flags") or []
+        for flag in flags:
+            # Το backend τα έχει ήδη τυπώσει με st.warning/error, 
+            # αλλά τα δείχνουμε ξανά εδώ συγκεντρωμένα για ευκολία.
+            pass
 
         used_sources = bundle.get("sources") or []
         if used_sources:
@@ -610,15 +601,9 @@ def _render_teasers(bundle: Dict[str, Any]) -> None:
         ):
             text = (teasers.get(key) or {}).get("text", "")
             st.markdown("<div class='teaser-box'>", unsafe_allow_html=True)
-            st.markdown(
-                f"<div class='teaser-platform'>{label}</div>",
-                unsafe_allow_html=True,
-            )
+            st.markdown(f"<div class='teaser-platform'>{label}</div>", unsafe_allow_html=True)
             st.markdown(f"<div class='teaser-text'>{text}</div>", unsafe_allow_html=True)
-            st.markdown(
-                f"<div class='char-count'>{len(text)} / {limit} χαρακτήρες</div>",
-                unsafe_allow_html=True,
-            )
+            st.markdown(f"<div class='char-count'>{len(text)} / {limit} χαρακτήρες</div>", unsafe_allow_html=True)
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("📋 Copy", key=f"copy_{key}_{lang_code}"):
@@ -631,6 +616,7 @@ def _render_cleaner_debug(cleaner_output: Dict[str, Any]) -> None:
         if cleaner_output.get("_fallback"):
             st.warning("⚠️ Cleaner απέτυχε — fallback στο raw content.")
         st.markdown(f"**Σύνοψη θέματος:** {cleaner_output.get('topic_summary') or '—'}")
+        st.markdown(f"**Ημερομηνία Πηγής:** {cleaner_output.get('source_date') or 'Άγνωστη'}")
         st.markdown("**Βασικά facts:**")
         facts = cleaner_output.get("key_facts") or []
         if facts:
@@ -652,8 +638,6 @@ def _render_bundle(bundle: Dict[str, Any], category: str) -> None:
 # ============================================
 
 def render_admin_tab() -> None:
-    """Render των τεσσάρων καρτελών."""
-
     for key, value in DEFAULT_STATE.items():
         if key not in st.session_state:
             if isinstance(value, (dict, list)):
@@ -677,20 +661,12 @@ def render_admin_tab() -> None:
         st.markdown("<div class='admin-section'>", unsafe_allow_html=True)
         st.markdown("<h2>📥 Inbox & Research</h2>", unsafe_allow_html=True)
 
-        # ---------------- Section A: Fresh News (ομαδοποιημένο) ----------------
         st.markdown("### 📰 Fresh News (ανά εταιρία)")
-
         watchlist = load_watchlist()
-        watchlist.sort(
-            key=lambda i: i.get("published_at") or "",
-            reverse=True,
-        )
+        watchlist.sort(key=lambda i: i.get("published_at") or "", reverse=True)
 
         if not watchlist:
-            st.info(
-                "📭 Δεν υπάρχουν φρέσκα νέα. Τρέξε `python scripts/poll_feeds.py` "
-                "ή χρησιμοποίησε το Deep Research πιο κάτω."
-            )
+            st.info("📭 Δεν υπάρχουν φρέσκα νέα. Τρέξε `python scripts/poll_feeds.py`.")
         else:
             by_company: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for item in watchlist:
@@ -698,27 +674,15 @@ def render_admin_tab() -> None:
                 by_company[ck].append(item)
 
             company_map = {c.key: c.display_name for c in list_companies()}
+            sorted_company_keys = sorted(by_company.keys(), key=lambda k: company_map.get(k, k).lower())
 
-            sorted_company_keys = sorted(
-                by_company.keys(),
-                key=lambda k: company_map.get(k, k).lower(),
-            )
-
-            st.markdown(
-                f"**Σύνολο: {len(watchlist)} items από {len(by_company)} εταιρίες**"
-            )
-            st.caption(
-                "💡 Κάθε εταιρία σε δικό της expander. Πάτα 🗑️ για να διαγράψεις "
-                "ένα item που δεν σε ενδιαφέρει."
-            )
+            st.markdown(f"**Σύνολο: {len(watchlist)} items από {len(by_company)} εταιρίες**")
+            st.caption("💡 Κάθε εταιρία σε δικό της expander. Πάτα 🗑️ για να διαγράψεις.")
 
             for ck in sorted_company_keys:
                 items = by_company[ck]
                 company_name = company_map.get(ck, ck)
-                with st.expander(
-                    f"🏢 {company_name} — {len(items)} items",
-                    expanded=False,
-                ):
+                with st.expander(f"🏢 {company_name} — {len(items)} items", expanded=False):
                     for item in items:
                         _render_news_card(
                             item,
@@ -729,108 +693,50 @@ def render_admin_tab() -> None:
 
         st.markdown("---")
 
-        # ---------------- Section B: Deep Research ----------------
         st.markdown("### 🔍 Deep Research (Επίσημες Ιστοσελίδες)")
-        st.caption(
-            "Ψάχνει **βαθιά** στο επίσημο site της εταιρίας (exact + loose match), "
-            "φιλτράρει pricing/privacy/untitled σελίδες, και σου δείχνει "
-            "**μόνο άρθρα με περίληψη**. Διαλέγεις ΕΝΑ — αυτό θα είναι η πηγή."
-        )
-
         companies = list_companies()
         company_map_dr = {c.key: c.display_name for c in companies}
 
         col1, col2 = st.columns([2, 3])
         with col1:
-            research_company_key = st.selectbox(
-                "Εταιρία",
-                options=list(company_map_dr.keys()),
-                format_func=lambda k: company_map_dr[k],
-                key="research_company_select",
-            )
+            research_company_key = st.selectbox("Εταιρία", options=list(company_map_dr.keys()), format_func=lambda k: company_map_dr[k], key="research_company_select")
         with col2:
-            research_query = st.text_input(
-                "Λέξη-κλειδί αναζήτησης",
-                placeholder="π.χ. V3 release, GPT-6, Muse Wonder",
-                key="research_query_input",
-            )
+            research_query = st.text_input("Λέξη-κλειδί αναζήτησης", placeholder="π.χ. V3 release", key="research_query_input")
 
         search_clicked = st.button("🔎 Search Official Site")
-
         if search_clicked:
             if not research_query or not research_query.strip():
-                st.error("❌ Γράψε μια λέξη-κλειδί για αναζήτηση.")
+                st.error("❌ Γράψε μια λέξη-κλειδί.")
             else:
                 try:
                     company = get_company(research_company_key)
-                except Exception as e:
-                    st.error(f"❌ Άγνωστη εταιρία: {e}")
-                    company = None
-
-                if company is not None:
                     primary = company.primary_domain
                     if not primary:
-                        st.error(
-                            f"❌ Η {company.display_name} δεν έχει domain "
-                            f"ρυθμισμένο στο sources.yaml."
-                        )
+                        st.error(f"❌ Η {company.display_name} δεν έχει domain.")
                     else:
-                        provider_name = st.session_state.get(
-                            "content_provider", "jina"
-                        )
-                        try:
-                            from utils.providers import get_provider
-                            provider = get_provider(name=provider_name)
-                        except Exception as e:
-                            st.error(f"❌ Σφάλμα provider: {e}")
-                            provider = None
+                        provider_name = st.session_state.get("content_provider", "jina")
+                        from utils.providers import get_provider
+                        provider = get_provider(name=provider_name)
 
-                        if provider is not None:
-                            with st.spinner(
-                                f"🔍 Βαθιά αναζήτηση στο {primary} για "
-                                f"«{research_query}» (exact + loose + filter)..."
-                            ):
-                                candidates, rejected = _deep_research(
-                                    provider=provider,
-                                    query=research_query,
-                                    site=primary,
-                                )
+                        with st.spinner("🔍 Βαθιά αναζήτηση..."):
+                            candidates, rejected = _deep_research(provider, research_query, primary)
 
-                            if not candidates:
-                                if rejected > 0:
-                                    st.warning(
-                                        f"⚠️ Βρέθηκαν {rejected} αποτελέσματα, "
-                                        f"αλλά **όλα** φιλτραρίστηκαν ως μη-άρθρα. "
-                                        f"Δοκίμασε πιο συγκεκριμένη λέξη-κλειδί."
-                                    )
-                                else:
-                                    st.warning(
-                                        f"⚠️ Δεν βρέθηκαν αποτελέσματα για "
-                                        f"«{research_query}» στο {primary}."
-                                    )
-                                st.session_state["research_results"] = None
-                            else:
-                                st.session_state["research_results"] = candidates
-                                st.session_state["research_query"] = research_query
-                                st.session_state["research_company_key"] = (
-                                    research_company_key
-                                )
-                                if rejected > 0:
-                                    st.info(
-                                        f"ℹ️ Φιλτραρίστηκαν {rejected} σελίδες "
-                                        f"ως μη-άρθρα."
-                                    )
+                        if not candidates:
+                            st.warning(f"⚠️ Δεν βρέθηκαν αποτελέσματα (απορρίφθηκαν {rejected}).")
+                            st.session_state["research_results"] = None
+                        else:
+                            st.session_state["research_results"] = candidates
+                            st.session_state["research_query"] = research_query
+                            st.session_state["research_company_key"] = research_company_key
+                except Exception as e:
+                    st.error(f"❌ Σφάλμα: {e}")
 
         research_results = st.session_state.get("research_results")
         research_company_key_stored = st.session_state.get("research_company_key")
         research_query_stored = st.session_state.get("research_query")
 
         if research_results:
-            st.markdown(
-                f"**Βρέθηκαν {len(research_results)} candidates για "
-                f"«{research_query_stored}»** — διάλεξε ΕΝΑ για να γίνει "
-                f"η πηγή του άρθρου:"
-            )
+            st.markdown(f"**Βρέθηκαν {len(research_results)} candidates:**")
             for src in research_results:
                 _render_news_card(
                     {
@@ -838,16 +744,13 @@ def render_admin_tab() -> None:
                         "url": src.get("url"),
                         "snippet": src.get("snippet", ""),
                         "company_key": research_company_key_stored,
-                        "company_name": company_map_dr.get(
-                            research_company_key_stored or "", ""
-                        ),
+                        "company_name": company_map_dr.get(research_company_key_stored or "", ""),
                     },
                     target_point=research_query_stored or "",
                     company_key=research_company_key_stored,
                     button_key_prefix="research",
                     show_delete=False,
                 )
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ============================================================
@@ -861,32 +764,24 @@ def render_admin_tab() -> None:
         pending_company = st.session_state.get("pending_company_key")
         pending_topic = st.session_state.get("pending_target_point")
         pending_title = st.session_state.get("pending_source_title")
+        pending_source_date = st.session_state.get("pending_source_date")
 
         if pending_url:
             st.info(
                 f"📥 Προ-συμπληρωμένο από Inbox/Research:\n"
                 f"- **Πηγή:** {pending_title or pending_url}\n"
                 f"- **URL:** {pending_url}\n"
-                f"- **Εταιρία:** {pending_company or '—'}"
+                f"- **Εταιρία:** {pending_company or '—'}\n"
+                f"- **Ημερομηνία:** {pending_source_date or '—'}"
             )
 
-        # --- Category + Language ---
         col1, col2 = st.columns(2)
         with col1:
-            category = st.selectbox(
-                "Κατηγορία *",
-                options=CATEGORY_NAMES,
-                help="Καθορίζει section + γωνία γραφής",
-            )
+            category = st.selectbox("Κατηγορία *", options=CATEGORY_NAMES)
         with col2:
-            language_label = st.selectbox(
-                "Γλώσσα *",
-                options=list(LANGUAGE_CHOICES.keys()),
-                index=0,
-            )
+            language_label = st.selectbox("Γλώσσα *", options=list(LANGUAGE_CHOICES.keys()), index=0)
             language_value = LANGUAGE_CHOICES[language_label]
 
-        # --- Ingestion Mode ---
         default_mode_idx = 1
         if pending_url:
             default_mode_idx = 2
@@ -896,65 +791,34 @@ def render_admin_tab() -> None:
             options=INGESTION_MODES,
             index=default_mode_idx,
             horizontal=True,
-            help=(
-                "Custom Idea: μόνο για Growth Hack — γράψε την ιδέα σου, "
-                "ο Sol θα γράψει το pitch."
-            ),
         )
 
-        # --- Custom Idea mode: skip company + provider, show textarea ---
         company_key = ""
         custom_idea: Optional[str] = None
         feed_item_url: Optional[str] = None
         target_point = ""
 
         if ingestion_mode == INGESTION_MODE_CUSTOM:
-            st.info(
-                "💡 **Custom Idea mode:** Γράψε το σενάριο/ιδέα σου. "
-                "Ο Sol θα γράψει το άρθρο βασισμένος σε αυτό — δεν χρειάζεται "
-                "εξωτερική πηγή."
-            )
-            custom_idea = st.text_area(
-                "Περιγράψε την ιδέα/σενάριο που θέλεις να προωθήσεις *",
-                height=200,
-                placeholder=(
-                    "π.χ. Μια μικρή επιχείρηση χάνει 10 ώρες/εβδομάδα σε "
-                    "χειροκίνητη καταχώριση τιμολογίων. Θέλουμε να δείξουμε "
-                    "πώς ο αυτοματισμός εξοικονομεί χρόνο και χρήμα."
-                ),
-            )
+            st.info("💡 **Custom Idea mode:**")
+            custom_idea = st.text_area("Ιδέα *", height=200)
             first_line = (custom_idea or "").strip().split("\n")[0].strip()
             target_point = first_line[:120] if first_line else ""
         else:
-            # --- Κανονικό flow: company + provider + mode inputs ---
             companies = list_companies()
             company_map = {c.key: c.display_name for c in companies}
-
             company_keys = list(company_map.keys())
             default_company_idx = 0
             if pending_company and pending_company in company_keys:
                 default_company_idx = company_keys.index(pending_company)
 
-            company_key = st.selectbox(
-                "Εταιρία *",
-                options=company_keys,
-                index=default_company_idx,
-                format_func=lambda k: company_map[k],
-                help="Πρωτογενής πηγή — μόνο domains από config/sources.yaml",
-            )
+            company_key = st.selectbox("Εταιρία *", options=company_keys, index=default_company_idx, format_func=lambda k: company_map[k])
 
             try:
                 company = get_company(company_key)
-            except Exception as e:
-                st.error(f"❌ Δεν φορτώθηκε η εταιρία {company_key}: {e}")
+            except Exception:
                 st.stop()
 
-            provider_choice = st.radio(
-                "Content Provider",
-                options=["jina", "tavily"],
-                index=0,
-                horizontal=True,
-            )
+            provider_choice = st.radio("Content Provider", options=["jina", "tavily"], index=0, horizontal=True)
             st.session_state["content_provider"] = provider_choice
 
             if ingestion_mode == INGESTION_MODE_RSS:
@@ -963,43 +827,20 @@ def render_admin_tab() -> None:
                 else:
                     items = load_watchlist_for_company(company_key)
                     if not items:
-                        st.info(f"📭 Δεν υπάρχουν items για {company.display_name}.")
+                        st.info(f"📭 Δεν υπάρχουν items.")
                     else:
-                        idx = st.selectbox(
-                            f"Feed item ({len(items)} διαθέσιμα) *",
-                            options=range(len(items)),
-                            format_func=lambda i: (
-                                f"{items[i].get('title', '(χωρίς τίτλο)')} "
-                                f"({items[i].get('published_at') or '—'})"
-                            ),
-                        )
+                        idx = st.selectbox(f"Feed item *", options=range(len(items)), format_func=lambda i: f"{items[i].get('title')} ({items[i].get('published_at') or '—'})")
                         feed_item_url = items[idx].get("url")
                         st.caption(f"🔗 {feed_item_url}")
 
-                target_point = st.text_input(
-                    "Θέμα άρθρου (λέξεις-κλειδιά) *",
-                    value=pending_topic or "",
-                )
+                target_point = st.text_input("Θέμα *", value=pending_topic or "")
 
             elif ingestion_mode == INGESTION_MODE_MANUAL:
-                feed_item_url = st.text_input(
-                    "URL *",
-                    value=pending_url or "",
-                    placeholder=f"https://{company.primary_domain or 'example.com'}/...",
-                )
-                target_point = st.text_input(
-                    "Θέμα άρθρου (λέξεις-κλειδιά) *",
-                    value=pending_topic or "",
-                )
+                feed_item_url = st.text_input("URL *", value=pending_url or "")
+                target_point = st.text_input("Θέμα *", value=pending_topic or "")
 
             elif ingestion_mode == INGESTION_MODE_RESTRICTED:
-                target_point = st.text_input(
-                    "Θέμα αναζήτησης *",
-                    value=pending_topic or "",
-                    placeholder="π.χ. V3 release",
-                )
-                primary = company.primary_domain or "?"
-                st.caption(f"🔍 Θα ψάξει μόνο στο `{primary}` και θα κρατήσει 1 πηγή.")
+                target_point = st.text_input("Θέμα *", value=pending_topic or "")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1009,19 +850,12 @@ def render_admin_tab() -> None:
 
         if generate_btn:
             missing: List[str] = []
-            if not category:
-                missing.append("Κατηγορία")
-
+            if not category: missing.append("Κατηγορία")
             if ingestion_mode == INGESTION_MODE_CUSTOM:
-                if not custom_idea or not custom_idea.strip():
-                    missing.append("Custom Idea")
+                if not custom_idea or not custom_idea.strip(): missing.append("Custom Idea")
             else:
-                if not target_point.strip():
-                    missing.append("Θέμα")
-                if (
-                    ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL)
-                    and not feed_item_url
-                ):
+                if not target_point.strip(): missing.append("Θέμα")
+                if ingestion_mode in (INGESTION_MODE_RSS, INGESTION_MODE_MANUAL) and not feed_item_url:
                     missing.append("URL / Feed item")
 
             if missing:
@@ -1030,11 +864,8 @@ def render_admin_tab() -> None:
                 try:
                     from utils.article_generator import ArticleGenerator
                     generator = ArticleGenerator()
-                except Exception as e:
-                    st.error(f"❌ Σφάλμα αρχικοποίησης ArticleGenerator: {e}")
-                    generator = None
-
-                if generator is not None:
+                    
+                    # Περνάμε το source_date στο pipeline
                     output = generator.full_pipeline(
                         target_point=target_point,
                         category=category,
@@ -1043,6 +874,7 @@ def render_admin_tab() -> None:
                         feed_item_url=feed_item_url,
                         language_selection=language_value,
                         custom_idea=custom_idea,
+                        source_date=pending_source_date,
                     )
 
                     st.session_state["last_gen"] = {
@@ -1053,17 +885,22 @@ def render_admin_tab() -> None:
                         "category": category,
                         "category_slug": output.get("category_slug", ""),
                         "target_point": target_point,
-                        "ingestion_mode": ingestion_mode,
                         "provider": st.session_state.get("content_provider", "jina"),
                         "saved": False,
                         "published": False,
                     }
 
+                    # Καθαρισμός
                     st.session_state["pending_feed_item_url"] = None
                     st.session_state["pending_company_key"] = None
                     st.session_state["pending_target_point"] = None
                     st.session_state["pending_source_title"] = None
+                    st.session_state["pending_source_date"] = None
 
+                except Exception as e:
+                    st.error(f"❌ Σφάλμα: {e}")
+
+        # Display Last Generation
         gen = st.session_state.get("last_gen")
         if gen and gen.get("bundles"):
             bundles = gen["bundles"]
@@ -1071,24 +908,15 @@ def render_admin_tab() -> None:
             category_slug = gen["category_slug"]
             target_point_v = gen["target_point"]
             company_key_v = (gen.get("company") or {}).get("key") or company_key
-            provider_label = gen.get("provider", "jina")
 
-            st.success(
-                f"✅ Δημιουργήθηκαν {len(bundles)} bundle(s) μέσω "
-                f"**{provider_label}** (1 πρωτογενής πηγή)"
-            )
+            st.success(f"✅ Δημιουργήθηκαν {len(bundles)} bundle(s) μέσω **{gen.get('provider')}**")
             _render_cleaner_debug(gen["cleaner"])
 
             if len(bundles) == 1:
                 _render_bundle(bundles[0], category_v)
             else:
                 flag = {"el": "🇬🇷", "en": "🇬🇧"}
-                tabs = st.tabs(
-                    [
-                        f"{flag.get(b['language'], '🌐')} {b['language_name']}"
-                        for b in bundles
-                    ]
-                )
+                tabs = st.tabs([f"{flag.get(b['language'], '🌐')} {b['language_name']}" for b in bundles])
                 for tab, bundle in zip(tabs, bundles):
                     with tab:
                         _render_bundle(bundle, category_v)
@@ -1096,29 +924,15 @@ def render_admin_tab() -> None:
             st.markdown("---")
             col1, col2 = st.columns(2)
             with col1:
-                if st.button(
-                    "💾 Αποθήκευση ως Draft",
-                    use_container_width=True,
-                    disabled=gen.get("saved") or gen.get("published"),
-                ):
-                    if save_bundles_as_drafts(
-                        bundles, target_point_v, category_v,
-                        category_slug, company_key_v,
-                    ):
+                if st.button("💾 Αποθήκευση ως Draft", use_container_width=True, disabled=gen.get("saved") or gen.get("published")):
+                    if save_bundles_as_drafts(bundles, target_point_v, category_v, category_slug, company_key_v):
                         gen["saved"] = True
                         st.success(f"✅ Αποθηκεύτηκαν {len(bundles)} draft(s).")
                     else:
                         st.error("❌ Αποτυχία αποθήκευσης draft(s)")
             with col2:
-                if st.button(
-                    "🚀 Άμεση Δημοσίευση",
-                    use_container_width=True,
-                    disabled=gen.get("published"),
-                ):
-                    if publish_bundles(
-                        bundles, target_point_v, category_v,
-                        category_slug, company_key_v,
-                    ):
+                if st.button("🚀 Άμεση Δημοσίευση", use_container_width=True, disabled=gen.get("published")):
+                    if publish_bundles(bundles, target_point_v, category_v, category_slug, company_key_v):
                         gen["published"] = True
                         st.success(f"✅ Δημοσιεύτηκαν {len(bundles)} άρθρα!")
                         st.balloons()
@@ -1142,21 +956,14 @@ def render_admin_tab() -> None:
         if not drafts:
             st.info("📭 Δεν υπάρχουν drafts ακόμα.")
         else:
-            st.markdown(
-                f"**Σύνολο Drafts:** {len(drafts)} (Μέγιστο {MAX_DRAFTS_IN_HISTORY})"
-            )
+            st.markdown(f"**Σύνολο Drafts:** {len(drafts)} (Μέγιστο {MAX_DRAFTS_IN_HISTORY})")
             st.markdown("---")
             for draft in reversed(drafts):
                 with st.container(border=True):
                     col1, col2 = st.columns([4, 1])
                     with col1:
-                        st.markdown(
-                            f"<div class='draft-title'>{draft['title']}</div>",
-                            unsafe_allow_html=True,
-                        )
-                        lang_badge = {"el": "🇬🇷", "en": "🇬🇧"}.get(
-                            draft.get("language", ""), "🌐"
-                        )
+                        st.markdown(f"<div class='draft-title'>{draft['title']}</div>", unsafe_allow_html=True)
+                        lang_badge = {"el": "🇬🇷", "en": "🇬🇧"}.get(draft.get("language", ""), "🌐")
                         st.markdown(
                             f"📅 {draft['date']} | 📂 {draft['category']} "
                             f"| 🏢 {draft.get('company_key', '—')} "
@@ -1168,10 +975,7 @@ def render_admin_tab() -> None:
                         if draft.get("translation_id"):
                             st.caption(f"🔗 translation_id: `{draft['translation_id']}`")
                     with col2:
-                        st.markdown(
-                            "<span class='status-badge status-draft'>DRAFT</span>",
-                            unsafe_allow_html=True,
-                        )
+                        st.markdown("<span class='status-badge status-draft'>DRAFT</span>", unsafe_allow_html=True)
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         if st.button("👁️ Προεπισκόπηση", key=f"pv_{draft['id']}"):
