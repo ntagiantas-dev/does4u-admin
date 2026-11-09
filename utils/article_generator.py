@@ -1,13 +1,13 @@
 """
-Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.2).
+Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.3).
 
 PRIMARY-SOURCE-ONLY pipeline:
     Fetch -> Cleaner -> Writer -> Teasers -> Sources section.
 
-Διορθώσεις v4.2 (TASK-223):
-    - Time-awareness: Περνάει η σημερινή ημερομηνία στο prompt.
-    - Πραγματικό word count & reading time.
-    - Έλεγχος μήκους στα teasers (truncate > limit).
+Διορθώσεις v4.3 (TASK-225):
+    - Πέρασμα `today` και `source_date` στο prompt.
+    - Υπολογισμός πραγματικού word count και reading time στην Python.
+    - Έλεγχος & περικοπή (truncate) των Teasers στα σωστά όρια.
 """
 import json
 import logging
@@ -138,7 +138,7 @@ def check_hallucinations(article_text: str, source_text: str) -> None:
 # ΚΥΡΙΑ ΚΛΑΣΗ
 # ============================================
 class ArticleGenerator:
-    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.2)."""
+    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.3)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -299,6 +299,7 @@ class ArticleGenerator:
         key_facts: Optional[List[str]] = None,
         language: str = "Greek",
         sources: Optional[List[Dict[str, str]]] = None,
+        source_date: str = "Άγνωστη",
     ) -> Optional[Dict[str, Any]]:
         if not cleaned_content or not cleaned_content.strip():
             logger.error("[Writer/%s] Empty cleaned content", language)
@@ -322,14 +323,16 @@ class ArticleGenerator:
         today_str = datetime.now().strftime("%d %B %Y")
 
         prompt = cfg["article_prompt"].format(
+            today=today_str,
+            source_date=source_date,
             target_point=target_point,
             category=category,
             language=language,
             cleaned_content=cleaned_content[:MAX_CLEANED_CONTENT_CHARS],
             key_facts=key_facts_str,
             citation_instructions=citation_instructions,
-            today=today_str,
         )
+        
         result = self._call_llm_json(
             model=WRITER_MODEL, prompt=prompt,
             max_tokens=WRITER_MAX_TOKENS,
@@ -346,10 +349,10 @@ class ArticleGenerator:
         if not result.get("slug"):
             result["slug"] = self._fallback_slug(result.get("title", ""))
 
-        # Υπολογισμός πραγματικού Word Count και Reading Time
-        word_count = len(article_text.split())
-        result["word_count"] = word_count
-        result["reading_time_minutes"] = max(1, round(word_count / 200))
+        # Υπολογισμός Πραγματικού Word Count και Reading Time
+        real_word_count = len(article_text.split())
+        result["word_count"] = real_word_count
+        result["reading_time_minutes"] = max(1, round(real_word_count / 200))
 
         return result
 
@@ -399,12 +402,12 @@ class ArticleGenerator:
             return generate_fallback_teasers(article_text)
 
         # Validation: Truncate αν ξεπερνάνε τα όρια
-        limits = {"twitter": 280, "linkedin": 300, "facebook": 150}
-        for platform, limit in limits.items():
-            if platform in result and "text" in result[platform]:
-                text = result[platform]["text"]
-                if len(text) > limit:
-                    result[platform]["text"] = text[:limit-3] + "..."
+        if len(result.get("twitter", {}).get("text", "")) > 280:
+            result["twitter"]["text"] = result["twitter"]["text"][:277] + "..."
+        if len(result.get("linkedin", {}).get("text", "")) > 300:
+            result["linkedin"]["text"] = result["linkedin"]["text"][:297] + "..."
+        if len(result.get("facebook", {}).get("text", "")) > 150:
+            result["facebook"]["text"] = result["facebook"]["text"][:147] + "..."
 
         return result
 
@@ -447,6 +450,7 @@ class ArticleGenerator:
                 "cleaned_content": raw_content,
                 "key_facts": [],
                 "topic_summary": "(custom idea — no external source)",
+                "source_date": datetime.now().strftime("%Y-%m-%d"),
                 "_fallback": True,
             }
             empty_result["company"] = {"key": "does4u", "display_name": "Does4U", "domains": []}
@@ -485,6 +489,7 @@ class ArticleGenerator:
                     "cleaned_content": truncated,
                     "key_facts": [],
                     "topic_summary": "(fallback — cleaner unavailable)",
+                    "source_date": "Άγνωστη",
                     "_fallback": True,
                 }
 
@@ -504,6 +509,7 @@ class ArticleGenerator:
                     key_facts=cleaner_output.get("key_facts") or [],
                     language=lang_name,
                     sources=sources,
+                    source_date=cleaner_output.get("source_date", "Άγνωστη"),
                 )
             if not article:
                 logger.error("[Pipeline] Writer failed for %s", lang_name)

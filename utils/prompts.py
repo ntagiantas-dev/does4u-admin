@@ -114,7 +114,7 @@ TASK:
 1. Remove all HTML, ads, navigation, and boilerplate.
 2. Remove repetition and filler text.
 3. Keep only factual, relevant content that serves the target keywords.
-4. PRESERVE all dates (dates) and model names (models) exactly as they are written in the source.
+4. ΔΙΑΤΗΡΗΣΕ όλες τις ημερομηνίες (dates) και τα ονόματα μοντέλων (models) αυτούσια.
 5. Extract 3-5 key facts as short standalone strings.
 6. Write a one-sentence topic summary.
 
@@ -122,29 +122,18 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 {{
   "cleaned_content": "clean text here",
   "key_facts": ["fact 1", "fact 2", "fact 3"],
-  "topic_summary": "one sentence summary"
+  "topic_summary": "one sentence summary",
+  "source_date": "YYYY-MM-DD or Άγνωστη"
 }}"""
 
 
 # ============================================
 # BLOG — CITATION INSTRUCTIONS
 # ============================================
-CITATION_INSTRUCTIONS = """CITATIONS & SOURCES FORMAT:
-
-INLINE CITATIONS — USE MARKDOWN LINKS (ΑΠΑΓΟΡΕΥΕΤΑΙ ΤΟ [1], [2]):
-- Χρησιμοποίησε inline Markdown links μέσα στο κείμενο.
-- Παραδείγματα: [όπως αναφέρεται στην τεκμηρίωση](URL), [η εταιρεία αναφέρει](URL), [σύμφωνα με τα επίσημα στοιχεία](URL).
-- Χρησιμοποίησε inline links ΜΟΝΟ όταν εισάγεις ένα νέο fact. Μην βάζεις link σε κάθε πρόταση για να μην κουράζεις τον αναγνώστη.
-- Κάθε factual claim (στατιστικό, απόσπασμα, ημερομηνία, τιμή) πρέπει να συνοδεύεται από inline link στην πηγή του.
-- ΜΗΝ εφεύρεις URLs. Χρησιμοποίησε ΜΟΝΟ όσα περιλαμβάνονται στη λίστα "AVAILABLE SOURCES" παρακάτω.
-
-## SOURCES SECTION (ΥΠΟΧΡΕΩΤΙΚΟ):
-Στο ΤΕΛΟΣ του άρθρου, πρόσθεσε ενότητα που ξεκινάει ΑΚΡΙΒΩΣ με `## Sources`
-και περιέχει bullet points με links των πηγών που χρησιμοποίησες:
-
-## Sources
-- [Τίτλος πηγής](https://url.com)
-- [Τίτλος δεύτερης πηγής](https://url.com)
+CITATION_INSTRUCTIONS = """ΟΔΗΓΙΕΣ ΠΑΡΑΠΟΜΠΩΝ:
+- Χρησιμοποίησε inline Markdown links: [κείμενο](URL).
+- Μην επαναλαμβάνεις το ίδιο anchor text. Χρησιμοποίησε ποικιλία (π.χ. [η ανακοίνωση](URL), [η τεκμηρίωση](URL), [όπως αναφέρεται εδώ](URL)).
+- Μέγιστο 6 links σε όλο το άρθρο. Μην βάζεις link σε κάθε παράγραφο αν δεν προσθέτει νέα πληροφορία.
 
 AVAILABLE SOURCES:
 {sources}"""
@@ -153,30 +142,33 @@ AVAILABLE SOURCES:
 # ============================================
 # BLOG — WRITER: AI UPDATES (PREMIUM FACT-CHECKING)
 # ============================================
-ARTICLE_GENERATION_PROMPT_AI_UPDATES = """Είσαι ένας Senior Ερευνητής Δημοσιογράφος. Ο στόχος σου είναι να γράψεις ένα απόλυτα τεκμηριωμένο άρθρο.
-ΠΗΓΗ: {cleaned_content}
+ARTICLE_GENERATION_PROMPT_AI_UPDATES = """Είσαι Senior Ερευνητής Δημοσιογράφος τεχνολογίας. Γράφεις τεκμηριωμένο άρθρο ειδήσεων.
+
+ΣΗΜΕΡΑ: {today}
+ΗΜΕΡΟΜΗΝΙΑ ΠΗΓΗΣ: {source_date}
 ΘΕΜΑ: {target_point}
-ΒΑΣΙΚΑ FACTS: {key_facts}
-ΣΗΜΕΡΙΝΗ ΗΜΕΡΟΜΗΝΙΑ: {today}
+ΠΗΓΗ: {cleaned_content}
+ΒΑΣΙΚΑ ΣΤΟΙΧΕΙΑ: {key_facts}
 
 ΚΑΝΟΝΕΣ:
-1. ΑΠΟΛΥΤΗ ΠΙΣΤΟΤΗΤΑ: Χρησιμοποίησε ΜΟΝΟ πληροφορίες που υπάρχουν στο κείμενο της πηγής. Αν δεν αναφέρεται, ΜΗΝ το γράφεις.
-2. ΗΜΕΡΟΜΗΝΙΑ: Βρες την ημερομηνία στην πηγή και γράψε την στην 1η παράγραφο. Αν η πηγή αναφέρει μελλοντικά γεγονότα (π.χ. 'θα αποσυρθεί'), έλεγξε αν αυτή η ημερομηνία έχει περάσει. Αν έχει περάσει, γράψε το στο παρελθόν. Μην χρησιμοποιείς το 'σήμερα'.
-3. ΠΙΝΑΚΕΣ: Αν η πηγή έχει νούμερα (τιμές, benchmarks), φτιάξε έναν πίνακα Markdown. Ανέφερε πάντα την πηγή των νούμερων.
-4. ΜΗΔΕΝΙΚΕΣ ΑΡΝΗΣΕΙΣ: Μην γράψεις ποτέ 'Το Χ δεν υπάρχει'. Αν η πηγή δεν το έχει, απλά αγνόησέ το.
-5. ΜΗΚΟΣ: Γράψε ένα άρθρο 400-600 λέξεων, ανάλογα με την πληροφορία της πηγής. Μην επαναλαμβάνεσαι για να γεμίσεις χώρο.
+1. ΠΙΣΤΟΤΗΤΑ: Χρησιμοποίησε ΜΟΝΟ πληροφορίες της πηγής. Ό,τι δεν αναφέρεται, δεν το γράφεις.
+2. ΧΡΟΝΟΙ: Στην 1η παράγραφο γράψε την ημερομηνία της πηγής («Στις <ημερομηνία>…»). Αν είναι «άγνωστη», βρες την στο κείμενο ή μην γράψεις ημερομηνία. Μην χρησιμοποιείς «σήμερα», «ήδη», «πρόσφατα», «μόλις». Κάθε ημερομηνία πριν από τη ΣΗΜΕΡΑ γράφεται σε παρελθόντα χρόνο.
+3. ΠΑΡΕΛΘΟΥΣΕΣ ΠΡΟΘΕΣΜΙΕΣ: Αν η πηγή αναφέρει μελλοντική προθεσμία που έχει ήδη περάσει σε σχέση με τη ΣΗΜΕΡΑ, γράψε ότι η ημερομηνία αυτή έχει παρέλθει και ότι ο αναγνώστης πρέπει να ελέγξει την τρέχουσα τεκμηρίωση. ΜΗΝ δίνεις οδηγίες ενέργειας «πριν από» αυτήν.
+4. ΠΑΛΑΙΑ ΠΗΓΗ: Αν η πηγή είναι παλαιότερη από 30 ημέρες, πρόσθεσε στην εισαγωγή μία πρόταση ότι το άρθρο αφορά την ανακοίνωση εκείνης της ημερομηνίας και ότι ενδέχεται να υπάρχουν νεότερες εξελίξεις.
+5. ΠΙΝΑΚΕΣ: Αν η πηγή έχει νούμερα (τιμές, benchmarks, παράμετροι), φτιάξε πίνακα Markdown ΚΑΙ μην επαναλάβεις τα ίδια νούμερα στο κείμενο. Ανέφερε ότι τα νούμερα είναι της εταιρείας.
+6. ΠΑΡΑΠΟΜΠΕΣ: Μία inline παραπομπή ανά παράγραφο, στην πρώτη πρόταση που αντλεί από την πηγή, με διαφορετική διατύπωση anchor κάθε φορά. Μέγιστο 6 inline links σε όλο το άρθρο. ΜΗΝ γράφεις «σύμφωνα με…» σε κάθε πρόταση.
+7. ΑΡΝΗΣΕΙΣ: Μην γράψεις «Το Χ δεν υπάρχει». Αν η πηγή δεν το αναφέρει, αγνόησέ το.
+8. ΑΝΑΛΥΣΗ: Σε κάθε ενότητα, μία σύντομη παράγραφος «τι σημαίνει αυτό για τον αναγνώστη» που προκύπτει λογικά ΜΟΝΟ από στοιχεία της πηγής και διατυπώνεται ως συμπέρασμα, όχι ως γεγονός της πηγής.
+9. ΜΗΚΟΣ: 500–800 λέξεις, ανάλογα με το υλικό. Μην επαναλαμβάνεις πληροφορίες για να φτάσεις το μήκος: κάθε παράγραφος φέρνει κάτι νέο.
+10. ΔΟΜΗ: Εισαγωγή (Τι & Πότε), 3 υποενότητες (H2), Συμπέρασμα με CTA που κλείνει με συγκεκριμένη ερώτηση.
+
+SEO RULES: 
+- Βάλε 5 σχετικά keywords.
+- Meta description έως 160 χαρακτήρες με το κύριο keyword.
+- Slug: μόνο πεζά αγγλικά γράμματα, αριθμοί και παύλες.
+- Γλώσσα: Απόλυτα φυσικά Ελληνικά. Απόφυγε μηχανικές μεταφράσεις.
 
 {citation_instructions}
-
-SLUG RULES:
-- 3 to 6 words, lowercase, hyphen-separated, ASCII Latin characters only.
-- Αν ο τίτλος είναι Ελληνικός, μετέγραψέ τον σε Λατινικούς χαρακτήρες.
-
-SEO RULES:
-- Primary keyword in the title, in the first 100 words, and in the conclusion.
-- Short paragraphs (max 3 sentences).
-
-ΔΟΜΗ: Εισαγωγή (Τι & Πότε), 3 υποενότητες (H2) με ανάλυση, Συμπέρασμα με CTA.
 
 ΓΛΩΣΣΑ: Γράψε το άρθρο αποκλειστικά στα {language}.
 
@@ -186,7 +178,10 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
   "slug": "...",
   "meta_description": "...",
   "content_markdown": "...",
-  "keywords": ["...", "...", "...", "...", "..."]
+  "keywords": ["...", "...", "...", "...", "..."],
+  "sources": [
+    {{"id": 1, "title": "...", "url": "..."}}
+  ]
 }}"""
 
 
@@ -195,6 +190,7 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 # ============================================
 ARTICLE_GENERATION_PROMPT_GROWTH_HACK = """You are an SEO content writer for a premium automation agency.
 ΣΗΜΕΡΙΝΗ ΗΜΕΡΟΜΗΝΙΑ: {today}
+ΗΜΕΡΟΜΗΝΙΑ ΠΗΓΗΣ: {source_date}
 
 TASK: Write an article for the "Growth Hack" blog section.
 Length: 400-600 words, depending on the source information. Do not repeat yourself just to fill space.
@@ -213,7 +209,7 @@ INPUT:
 🚨 PREMIUM FACT-CHECKING & FORMATTING RULES (STRICTLY ENFORCED):
 1. DATES: Always mention the release date or announcement date in the first paragraph, IF provided.
 2. BENCHMARKS/PRICING: If the source provides numbers, create a Markdown table.
-3. MEASURABLE RESULTS: If you provide an example with numbers (e.g., "saves 10 hours"), you MUST write next to it "*(Ενδεικτικό σενάριο)*". It is FORBIDDEN to present numbers as real client facts.
+3. MEASURABLE RESULTS: Αν δίνεις παράδειγμα με νούμερα, γράψε δίπλα '*(Ενδεικτικό σενάριο)*'. Απαγορεύεται να παρουσιάσεις νούμερα ως πραγματικά γεγονότα πελάτη.
 4. ZERO HALLUCINATION: Stick strictly to the facts provided. Do not invent features, dates, or numbers.
 5. LINKS: Use inline Markdown links only when introducing new facts. Do not link every sentence.
 
