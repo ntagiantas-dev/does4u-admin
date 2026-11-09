@@ -1,23 +1,19 @@
 """
-Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.0, D-020).
+Pipeline δημιουργίας άρθρου για το does4u admin panel (v4.2).
 
 PRIMARY-SOURCE-ONLY pipeline:
-    Fetch (ακριβώς 1 πρωτογενής πηγή)
-        -> Cleaner (καθαρισμός περιεχομένου)
-        -> Writer (Sol — φυσικό ελληνικό ύφος + inline citations)
-        -> Teasers (Sol, fallback σε 4o-mini)
-        -> ## Sources section (programmatic append)
+    Fetch -> Cleaner -> Writer -> Teasers -> Sources section.
 
-Ingestion modes:
-    - "RSS (today's items)"  : item από watchlist_queue.json.
-    - "Restricted Search"    : SERP περιορισμένο στο domain της εταιρίας.
-    - "Manual URL"           : URL που δίνει ο χρήστης.
-    - "Custom Idea"          : Η ιδέα του CEO (χωρίς εξωτερική πηγή).
+Διορθώσεις v4.2 (TASK-223):
+    - Time-awareness: Περνάει η σημερινή ημερομηνία στο prompt.
+    - Πραγματικό word count & reading time.
+    - Έλεγχος μήκους στα teasers (truncate > limit).
 """
 import json
 import logging
 import re
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -114,24 +110,17 @@ def append_sources_section(
 
 
 def check_hallucinations(article_text: str, source_text: str) -> None:
-    """Έλεγχος για αριθμούς στο άρθρο που δεν υπάρχουν στην πηγή.
-
-    Σκανάρει το τελικό κείμενο για αριθμούς (π.χ. 2026, 45%, 1.5) και
-    εμφανίζει warning στο Streamlit αν δεν βρεθούν στο source_text.
-    """
-    # Regex για ακέραιους, δεκαδικούς και ποσοστά (π.χ. 1,000 ή 45.5%)
+    """Έλεγχος για αριθμούς στο άρθρο που δεν υπάρχουν στην πηγή."""
     pattern = r'\b\d{1,3}(?:,\d{3})*(?:\.\d+)?%?\b'
     article_numbers = set(re.findall(pattern, article_text))
     source_numbers = set(re.findall(pattern, source_text))
 
     def clean_num(n: str) -> str:
-        # Αφαιρούμε κόμμα χιλιάδων και περιττά μηδενικά
         return n.replace(',', '').replace('.0', '')
 
     clean_article = {clean_num(n) for n in article_numbers}
     clean_source = {clean_num(n) for n in source_numbers}
 
-    # Αγνοούμε πολύ μικρούς αριθμούς (π.χ. 1, 2, 3) για να μην έχουμε false positives
     missing_numbers = set()
     for num in clean_article - clean_source:
         try:
@@ -149,7 +138,7 @@ def check_hallucinations(article_text: str, source_text: str) -> None:
 # ΚΥΡΙΑ ΚΛΑΣΗ
 # ============================================
 class ArticleGenerator:
-    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.1)."""
+    """Pipeline δημιουργίας άρθρου (primary-source-only, v4.2)."""
 
     def __init__(self) -> None:
         self.api_key: Optional[str] = st.secrets.get("OPENAI_API_KEY")
@@ -330,6 +319,8 @@ class ArticleGenerator:
         sources_str = self._format_sources_for_prompt(sources)
         citation_instructions = CITATION_INSTRUCTIONS.format(sources=sources_str)
 
+        today_str = datetime.now().strftime("%d %B %Y")
+
         prompt = cfg["article_prompt"].format(
             target_point=target_point,
             category=category,
@@ -337,6 +328,7 @@ class ArticleGenerator:
             cleaned_content=cleaned_content[:MAX_CLEANED_CONTENT_CHARS],
             key_facts=key_facts_str,
             citation_instructions=citation_instructions,
+            today=today_str,
         )
         result = self._call_llm_json(
             model=WRITER_MODEL, prompt=prompt,
@@ -345,11 +337,20 @@ class ArticleGenerator:
         )
         if not result:
             return None
-        if not result.get("content_markdown"):
+        
+        article_text = result.get("content_markdown", "")
+        if not article_text:
             logger.error("[Writer] Missing content_markdown")
             return None
+            
         if not result.get("slug"):
             result["slug"] = self._fallback_slug(result.get("title", ""))
+
+        # Υπολογισμός πραγματικού Word Count και Reading Time
+        word_count = len(article_text.split())
+        result["word_count"] = word_count
+        result["reading_time_minutes"] = max(1, round(word_count / 200))
+
         return result
 
     # ------------------------------------------------------------------
@@ -381,22 +382,31 @@ class ArticleGenerator:
             max_tokens=TEASER_MAX_TOKENS,
             stage=f"Teasers/{category}/{language}",
         )
-        if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
-            return result
+        
+        # Fallback αν απέτυχε ο TEASER_MODEL
+        if not (result and all(k in result for k in ("twitter", "linkedin", "facebook"))):
+            logger.warning(
+                "[Teasers/%s/%s] Primary model failed, trying %s",
+                category, language, TEASER_FALLBACK_MODEL,
+            )
+            result = self._call_llm_json(
+                model=TEASER_FALLBACK_MODEL, prompt=prompt,
+                max_tokens=TEASER_FALLBACK_MAX_TOKENS,
+                stage=f"Teasers-fallback/{category}/{language}",
+            )
 
-        logger.warning(
-            "[Teasers/%s/%s] Primary model failed, trying %s",
-            category, language, TEASER_FALLBACK_MODEL,
-        )
-        result = self._call_llm_json(
-            model=TEASER_FALLBACK_MODEL, prompt=prompt,
-            max_tokens=TEASER_FALLBACK_MAX_TOKENS,
-            stage=f"Teasers-fallback/{category}/{language}",
-        )
-        if result and all(k in result for k in ("twitter", "linkedin", "facebook")):
-            return result
+        if not (result and all(k in result for k in ("twitter", "linkedin", "facebook"))):
+            return generate_fallback_teasers(article_text)
 
-        return generate_fallback_teasers(article_text)
+        # Validation: Truncate αν ξεπερνάνε τα όρια
+        limits = {"twitter": 280, "linkedin": 300, "facebook": 150}
+        for platform, limit in limits.items():
+            if platform in result and "text" in result[platform]:
+                text = result[platform]["text"]
+                if len(text) > limit:
+                    result[platform]["text"] = text[:limit-3] + "..."
+
+        return result
 
     # ------------------------------------------------------------------
     # Full pipeline
@@ -454,7 +464,6 @@ class ArticleGenerator:
                 st.error(f"❌ Unknown company: {exc}")
                 return empty_result
 
-            # Επιστρέφει πλέον 3 τιμές (προστέθηκε το final_target_point λόγω Source Gate)
             raw_content, sources, final_target_point = self._fetch_content(
                 ingestion_mode=ingestion_mode,
                 target_point=target_point,
@@ -505,7 +514,6 @@ class ArticleGenerator:
                 sources,
             )
 
-            # Έλεγχος Παραπληροφόρησης (Hallucinations)
             check_hallucinations(article["content_markdown"], cleaner_output.get("cleaned_content", ""))
 
             with st.spinner(f"📱 Generating teasers ({target['native']})..."):
@@ -548,11 +556,7 @@ class ArticleGenerator:
         company_key: str,
         feed_item_url: Optional[str] = None,
     ) -> tuple[str, List[Dict[str, str]], str]:
-        """Fetch 1 source βάσει ingestion_mode.
-
-        Returns:
-            (raw_content, sources, final_target_point)
-        """
+        """Fetch 1 source βάσει ingestion_mode."""
         if ingestion_mode == INGESTION_MODE_CUSTOM:
             return "", [], target_point
 
@@ -609,14 +613,10 @@ class ArticleGenerator:
             sources = merged["sources"][:1]
             raw_content = merged.get("content", "")
 
-        # ---------------------------------------------------------
-        # SOURCE GATE: Έλεγχος αν το topic υπάρχει στην πηγή
-        # ---------------------------------------------------------
+        # SOURCE GATE
         final_target = target_point
         if raw_content and target_point.strip():
-            # Απλός έλεγχος (case-insensitive)
             if target_point.lower() not in raw_content.lower():
-                # Αν η πηγή έχει τίτλο, αλλάζουμε το topic σε αυτόν
                 if sources and sources[0].get("title"):
                     final_target = sources[0]["title"]
                     st.warning(
