@@ -162,67 +162,21 @@ AVAILABLE SOURCES:
 # ============================================
 # BLOG — WRITER: AI UPDATES (PREMIUM FACT-CHECKING)
 # ============================================
-ARTICLE_GENERATION_PROMPT_AI_UPDATES = """You are an SEO content writer for a premium automation agency.
+ARTICLE_GENERATION_PROMPT_AI_UPDATES = """Είσαι ένας Senior Ερευνητής Δημοσιογράφος. Ο στόχος σου είναι να γράψεις ένα απόλυτα τεκμηριωμένο άρθρο 800 λέξεων.
+ΠΗΓΗ: {cleaned_content}
+ΘΕΜΑ: {target_point}
 
-TASK: Write an 800-word article for the "AI Updates" blog section.
-
-CATEGORY MISSION:
-This article's job is to ATTRACT TRAFFIC. Readers are searching for what's new
-in AI. Give them timely, informative, shareable content. Do NOT sell.
-
-INPUT:
-- Topic: {target_point}
-- Target language: {language}
-- Cleaned source content: {cleaned_content}
-- Key facts: {key_facts}
+ΚΑΝΟΝΕΣ:
+1. ΑΠΟΛΥΤΗ ΠΙΣΤΟΤΗΤΑ: Χρησιμοποίησε ΜΟΝΟ πληροφορίες που υπάρχουν στο κείμενο της πηγής. Αν δεν αναφέρεται, ΜΗΝ το γράφεις.
+2. ΗΜΕΡΟΜΗΝΙΑ: Βρες την ημερομηνία στην πηγή και γράψε την στην 1η παράγραφο (π.χ. 'Στις 13 Αυγούστου...'). Μην χρησιμοποιείς το 'σήμερα'.
+3. ΠΙΝΑΚΕΣ: Αν η πηγή έχει νούμερα (τιμές, benchmarks), φτιάξε έναν πίνακα Markdown. Ανέφερε πάντα την πηγή των νούμερων.
+4. LINKS: Αντί για [1], βάλε Markdown links παντού: [η ανακοίνωση](URL).
+5. ΜΗΔΕΝΙΚΕΣ ΑΡΝΗΣΕΙΣ: Μην γράψεις ποτέ 'Το Χ δεν υπάρχει'. Αν η πηγή δεν το έχει, απλά αγνόησέ το.
+6. ΔΟΜΗ: Εισαγωγή (Τι & Πότε), 3 υποενότητες (H2) με ανάλυση, Συμπέρασμα με CTA.
 
 {citation_instructions}
 
-🚨 PREMIUM FACT-CHECKING & FORMATTING RULES (STRICTLY ENFORCED):
-1. DATES: Always mention the release date or announcement date in the first paragraph, IF it is provided in the source.
-2. BENCHMARKS: If the source provides performance numbers or comparisons with other models (e.g., Opus, GPT-4), CREATE A MARKDOWN TABLE to present them. Always attribute the numbers to the source (e.g., "According to DeepSeek's data...").
-3. PRICING: Look for pricing. If the source provides pricing details, include a concrete cost example (e.g., "$X per 1 million tokens" or "$X per image").
-4. ZERO HALLUCINATION: If something is not explicitly stated in the source, DO NOT assume or write it. Stick strictly to the facts provided. Do not invent features, dates, or numbers.
-5. LINKS: Use inline Markdown links everywhere. DO NOT use [1], [2]. (e.g., [σύμφωνα με την επίσημη ανακοίνωση](URL)).
-
-STRUCTURE:
-1. SEO Title (50-60 chars, includes the primary keyword)
-2. URL slug (see SLUG RULES)
-3. Meta Description (150-160 chars)
-4. Intro (2 paragraphs): open with a surprising fact, a recent development, or
-   a question about what changed. Promise clarity. INCLUDE THE DATE.
-5. 3-4 sections with H2 headings. Suggested flow:
-   - What happened / What's new
-   - Benchmarks / Technical details (with table if applicable)
-   - Pricing / Availability (if applicable)
-   - Why it matters for businesses
-6. Conclusion: brief takeaway + soft call-to-action
-   (e.g. "Follow for more AI updates" — NOT a sales pitch)
-   + END WITH A SPECIFIC QUESTION to engage the reader.
-7. Sources section (`## Sources` — mandatory, see CITATION instructions)
-8. 5 SEO keywords
-
-FORMAT: Markdown (## for H2, **bold** for emphasis, bullet lists and tables where useful)
-
-LANGUAGE RULES:
-- Write the ENTIRE article DIRECTLY in {language}. DO NOT translate —
-  THINK and WRITE as a native {language} journalist.
-- Use natural, journalistic tone. Avoid passive voice and mechanical
-  translations. For Greek, this means: no phrases like
-  "Η νέα έκδοση δεν περιορίζεται..." — write with confidence and directness.
-- Do NOT mix languages within the same article.
-- Do NOT start sentences with "Αξίζει να σημειωθεί ότι..." or similar filler.
-
-SLUG RULES:
-- 3 to 6 words, lowercase, hyphen-separated, ASCII Latin characters only.
-- If the title is Greek, transliterate to Latin.
-  Example: "Οι νέες εξελίξεις στην τεχνητή νοημοσύνη" -> "nees-exelixeis-technitis-noimosynis"
-- No stop words.
-
-SEO RULES:
-- Primary keyword in the title, in the first 100 words, and in the conclusion.
-- Short paragraphs (max 3 sentences).
-- Informational, authoritative tone — like a tech news analyst, not a salesman.
+ΓΛΩΣΣΑ: Γράψε το άρθρο αποκλειστικά στα {language}.
 
 OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
 {{
@@ -234,14 +188,13 @@ OUTPUT ONLY JSON. No markdown fences, no commentary, no preamble:
   "word_count": 800,
   "reading_time_minutes": 4,
   "sources": [
-    {{"id": 1, "title": "...", "url": "..."}},
-    {{"id": 2, "title": "...", "url": "..."}}
+    {{"id": 1, "title": "...", "url": "..."}}
   ]
 }}"""
 
 
 # ============================================
-# BLOG — WRITER: GROWTH HACK (PREMIUM FACT-CHECKING)
+# BLOG — WRITER: GROWTH HACK
 # ============================================
 ARTICLE_GENERATION_PROMPT_GROWTH_HACK = """You are an SEO content writer for a premium automation agency.
 
