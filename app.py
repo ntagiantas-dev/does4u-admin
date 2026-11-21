@@ -100,4 +100,10 @@ st.markdown(
 # ============================================
 # RENDER ADMIN TABS
 # ============================================
-render_admin_tab()
+from tabs.simple_blog_tab import render_simple_blog_tab
+
+main_tabs = st.tabs(["📚 Blog με πηγές", "✍️ Blog χωρίς πηγές"])
+with main_tabs[0]:
+    render_admin_tab()
+with main_tabs[1]:
+    render_simple_blog_tab()

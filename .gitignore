@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 .streamlit/secrets.toml
 venv/
+
+__pycache__/
+*.pyc
+simple_drafts/
